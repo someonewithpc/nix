@@ -118,6 +118,7 @@ sources = files(
   'function-trace.cc',
   'get-drvs.cc',
   'json-to-value.cc',
+  'lexer-simd.cc',
   'lexer.cc',
   'nixexpr.cc',
   'parser.cc',

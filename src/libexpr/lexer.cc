@@ -1,4 +1,5 @@
 #include "lexer.hh"
+#include "lexer-simd.hh"
 
 #include <array>
 #include <cassert>
@@ -175,6 +176,33 @@ Kind charKind(unsigned char c)
     }
 }
 
+simd::Classifier classifier()
+{
+    static const simd::Classifier c = simd::pickClassifier();
+    return c;
+}
+
+/* Tokens of one character that no longer token starts with */
+constexpr std::array<Kind, 256> makeSingles()
+{
+    std::array<Kind, 256> t{};
+    for (auto & k : t)
+        k = NUM_KINDS;
+    t[';'] = SEMICOLON;
+    t['('] = LPAREN;
+    t[')'] = RPAREN;
+    t['['] = LBRACKET;
+    t[']'] = RBRACKET;
+    t[','] = COMMA;
+    t['@'] = AT;
+    t['?'] = QUESTION;
+    t[':'] = COLON;
+    t['*'] = STAR;
+    return t;
+}
+
+constexpr auto singles = makeSingles();
+
 class Lexer
 {
     char * const s;
@@ -237,6 +265,45 @@ class Lexer
         out.errors.push_back(LexError{k, offset, std::move(text)});
         emit(LEX_ERROR, Raw, out.errors.size() - 1);
         return false;
+    }
+
+    simd::Classifier classify;
+    uint32_t maskBlock = UINT32_MAX;
+    simd::Masks masks;
+
+    const simd::Masks & masksFor(uint32_t block)
+    {
+        if (block != maskBlock) {
+            uint32_t start = block << 6;
+            /* Past the content are the two NULs, and then maybe nothing */
+            if (start + 64 <= n + 2)
+                classify(reinterpret_cast<const unsigned char *>(s + start), masks);
+            else {
+                unsigned char tail[64] = {};
+                memcpy(tail, s + start, n + 2 - start);
+                classify(tail, masks);
+            }
+            maskBlock = block;
+        }
+        return masks;
+    }
+
+    /* The first offset from `p` whose byte is (`in`) or is not (`!in`) in
+       the class, or `n` */
+    template<bool in>
+    uint32_t scan(uint32_t p, uint64_t simd::Masks::*cls)
+    {
+        while (p < n) {
+            uint32_t block = p >> 6;
+            uint64_t m = masksFor(block).*cls;
+            if (!in)
+                m = ~m;
+            m >>= p & 63;
+            if (m)
+                return std::min(p + uint32_t(std::countr_zero(m)), n);
+            p = (block + 1) << 6;
+        }
+        return n;
     }
 
     uint32_t run(uint32_t p, uint16_t f) const
@@ -425,6 +492,7 @@ public:
         : s(s)
         , n(n)
         , ls(ls)
+        , classify(classifier())
     {
         out.tokens.reserve(n / 4 + 16);
     }
@@ -438,18 +506,57 @@ bool Lexer::lexDefault(uint32_t & p)
     Match m;
 
     if (is(c, Space)) {
-        uint32_t q = run(p, Space);
+        uint32_t q = scan<false>(p, &simd::Masks::space);
         adjust(q - p);
         docDistance--;
         p = q;
         return true;
     }
 
+    if (is(c, IdStart)) {
+        uint32_t e = scan<false>(p + 1, &simd::Masks::ident);
+        char d = s[e];
+        /* Only these can make it a path or a URI instead */
+        if (d != '/' && d != ':' && d != '.' && d != '+') {
+            uint32_t l = e - p;
+            Kind k = ID;
+            if (l <= 7)
+                for (auto & kw : keywords)
+                    if (kw.text.size() == l && std::string_view(s + p, l) == kw.text) {
+                        k = kw.kind;
+                        break;
+                    }
+            adjust(l);
+            emit(k);
+            p = e;
+            return true;
+        }
+    }
+
+    if (is(c, Digit)) {
+        uint32_t e = scan<false>(p + 1, &simd::Masks::digit);
+        unsigned char d = s[e];
+        if (!is(d, PathChar) && d != '/') {
+            adjust(e - p);
+            if (!number(INT_LIT, p, e - p)) {
+                p = e;
+                return false;
+            }
+            p = e;
+            return true;
+        }
+    }
+
+    if (Kind k = singles[c]; k != NUM_KINDS) {
+        adjust(1);
+        emit(k);
+        p++;
+        return true;
+    }
+
     switch (+c) {
     case '#': {
-        uint32_t q = p + 1;
-        while (q < n && s[q] != '\n' && s[q] != '\r')
-            q++;
+        uint32_t q = scan<true>(p + 1, &simd::Masks::newline);
         adjust(q - p);
         docDistance--;
         p = q;
