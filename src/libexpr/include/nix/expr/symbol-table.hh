@@ -1,6 +1,7 @@
 #pragma once
 ///@file
 
+#include <atomic>
 #include <memory_resource>
 #include "nix/expr/value.hh"
 #include "nix/expr/static-string-data.hh"
@@ -279,7 +280,15 @@ private:
      */
     boost::concurrent_flat_set<SymbolStr, SymbolStr::Hash, SymbolStr::Equal> symbols{SymbolStr::chunkSize};
 
+    static inline std::atomic<uint64_t> nextSerial{1};
+
 public:
+    /**
+     * Different for every table this process creates, so a cache of symbols
+     * can tell whether they still belong to the table in front of it
+     */
+    const uint64_t serial = nextSerial.fetch_add(1, std::memory_order_relaxed);
+
     SymbolTable(const StaticSymbolTable & staticSymtab)
     {
         staticSymtab.copyIntoSymbolTable(*this);

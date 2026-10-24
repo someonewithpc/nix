@@ -15,6 +15,7 @@
 #include "lexer.hh"
 
 #include <bit>
+#include <cstring>
 
 namespace nix {
 
@@ -89,6 +90,114 @@ struct E
     Expr * e;
     uint32_t begin;
 };
+
+/* Interning through the shared table is a concurrent hash map operation,
+   and most identifiers repeat, so each thread keeps a plain hash map in
+   front of it. Names up to `inlineLen` bytes live in the entry itself, so a
+   hit touches one cache line */
+class SymbolCache
+{
+    static constexpr size_t inlineLen = 16;
+
+    struct Entry
+    {
+        uint64_t hash;
+        Symbol sym;
+        uint32_t len;
+        union
+        {
+            char text[inlineLen];
+            const char * ptr;
+        };
+    };
+
+    static_assert(sizeof(Entry) == 32);
+
+    std::vector<Entry> entries;
+    size_t used = 0;
+    uint64_t serial = 0;
+
+    static uint64_t hashOf(const char * p, size_t len)
+    {
+        constexpr uint64_t k = 0x9e3779b97f4a7c15ull;
+        uint64_t h = len * k;
+        while (len >= 8) {
+            uint64_t w;
+            memcpy(&w, p, 8);
+            h = (std::rotl(h, 29) ^ w) * k;
+            p += 8;
+            len -= 8;
+        }
+        if (len) {
+            uint64_t w = 0;
+            memcpy(&w, p, len);
+            h = (std::rotl(h, 29) ^ w) * k;
+        }
+        return h ^ (h >> 32);
+    }
+
+    void grow()
+    {
+        std::vector<Entry> old(entries.size() * 2);
+        old.swap(entries);
+        size_t mask = entries.size() - 1;
+        for (auto & e : old)
+            if (e.sym) {
+                size_t i = e.hash & mask;
+                while (entries[i].sym)
+                    i = (i + 1) & mask;
+                entries[i] = e;
+            }
+    }
+
+    [[gnu::noinline]] Symbol insert(SymbolTable & symbols, std::string_view s, uint64_t h, size_t i)
+    {
+        Symbol sym = symbols.create(s);
+        auto & e = entries[i];
+        e.hash = h;
+        e.sym = sym;
+        e.len = uint32_t(s.size());
+        if (s.size() <= inlineLen) {
+            memset(e.text, 0, inlineLen);
+            memcpy(e.text, s.data(), s.size());
+        } else
+            /* The table's copy, which lives as long as the table */
+            e.ptr = std::string_view(symbols[sym]).data();
+        if (++used * 2 > entries.size())
+            grow();
+        return sym;
+    }
+
+public:
+    /**
+     * Forget symbols from any other table
+     */
+    void start(const SymbolTable & symbols)
+    {
+        if (serial == symbols.serial)
+            return;
+        entries.assign(4096, Entry{});
+        used = 0;
+        serial = symbols.serial;
+    }
+
+    Symbol get(SymbolTable & symbols, std::string_view s)
+    {
+        uint64_t h = hashOf(s.data(), s.size());
+        size_t mask = entries.size() - 1;
+        size_t i = h & mask;
+        for (; entries[i].sym; i = (i + 1) & mask) {
+            auto & e = entries[i];
+            if (e.hash != h || e.len != s.size())
+                continue;
+            if (memcmp(s.size() <= inlineLen ? e.text : e.ptr, s.data(), s.size()) == 0)
+                return e.sym;
+        }
+        return insert(symbols, s, h, i);
+    }
+};
+
+thread_local SymbolCache symbolCache;
 
 /* Nesting the parser handles before giving up instead of running out of
    stack */
@@ -228,7 +337,7 @@ class Parser
 
     Symbol sym(const Token & tok)
     {
-        return st.symbols.create(raw(tok));
+        return symbolCache.get(st.symbols, raw(tok));
     }
 
     void setDocPosition(ExprLambda * lambda, uint32_t begin)
@@ -302,6 +411,7 @@ public:
         , tk(tk)
         , t(tk.tokens.data())
     {
+        symbolCache.start(st.symbols);
     }
 
     Expr * parseStart(bool repl);
@@ -803,7 +913,7 @@ E Parser::parseSimple()
         auto s = raw(tok);
         if (s == "__curPos")
             return {ex.add<ExprPos>(at(tok.begin)), tok.begin};
-        return {ex.add<ExprVar>(at(tok.begin), st.symbols.create(s)), tok.begin};
+        return {ex.add<ExprVar>(at(tok.begin), sym(tok)), tok.begin};
     }
     case INT_LIT:
         next();
