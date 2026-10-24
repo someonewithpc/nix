@@ -63,9 +63,11 @@ bool rightAssoc(Kind k)
     return k == IMPL || k == UPDATE || k == CONCAT;
 }
 
+/* `?` is declared non-associative too, but its right side is an attribute
+   path, so `a ? b ? c` never reaches the conflict that would reject it */
 bool nonAssoc(Prec p)
 {
-    return p == PEq || p == PCmp || p == PHasAttr;
+    return p == PEq || p == PCmp;
 }
 
 /* Tokens that start an `expr_simple`, and so an argument of an application
@@ -554,7 +556,7 @@ E Parser::parseExprOp(int minPrec)
         if (op.kind == QUESTION) {
             auto path = parseAttrPath();
             lhs.e = st.exprs.add<ExprOpHasAttr>(st.exprs.alloc, lhs.e, path);
-            lastNonAssoc = p;
+            lastNonAssoc = PNone;
             continue;
         }
 
@@ -842,6 +844,9 @@ E Parser::parseSimple()
             next();
             return {start, tok.begin};
         }
+        /* The grammar only takes a literal segment before an interpolation */
+        if (kind() == STR && kindAt(1) != DOLLAR_CURLY)
+            syntaxError(t[1], {DOLLAR_CURLY});
         auto parts = parseInterpolated(true);
         expect(PATH_END, {STR, PATH_END, DOLLAR_CURLY});
         parts.insert(parts.begin(), {at(tok.begin), start});

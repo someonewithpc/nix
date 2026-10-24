@@ -3,11 +3,16 @@
 #include "nix/expr/eval.hh"
 #include "nix/expr/eval-gc.hh"
 #include "nix/expr/eval-settings.hh"
-#include "nix/expr/parser.hh"
+#if __has_include("nix/expr/parser.hh")
+#  include "nix/expr/parser.hh"
+#else
+#  include "nix/parser-tab.hh"
+#endif
 #include "nix/fetchers/fetch-settings.hh"
 #include "nix/store/store-open.hh"
 #include "nix/store/globals.hh"
 #include "nix/util/file-system.hh"
+#include "nix/util/terminal.hh"
 
 #include <chrono>
 #include <fstream>
@@ -95,7 +100,7 @@ int main(int argc, char ** argv)
                 if (r == 0) {
                     failures++;
                     if (dump.is_open())
-                        dump << "=== " << paths[i] << "\nERROR\n";
+                        dump << "=== " << paths[i] << "\nERROR " << filterANSIEscapes(ex.what(), true) << "\n";
                 }
             }
         }
