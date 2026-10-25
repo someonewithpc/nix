@@ -1,7 +1,9 @@
 // Check every lexer classifier against the scalar one on random blocks
 #include "../src/libexpr/lexer-simd.hh"
 
+#include <chrono>
 #include <cstdio>
+#include <vector>
 #include <cstring>
 #include <random>
 
@@ -30,4 +32,20 @@ int main()
     for (auto & [name, _] : all)
         printf("%s ", name);
     printf("agree on 2000000 random blocks\n");
+
+    /* 64 MiB of source-like bytes, classified block by block */
+    std::vector<unsigned char> buf(64 << 20);
+    for (auto & b : buf)
+        b = interesting[rng() % 26];
+    for (auto & [name, classify] : all) {
+        uint64_t sink = 0;
+        auto t0 = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < buf.size(); i += 64) {
+            Masks m;
+            classify(buf.data() + i, m);
+            sink += m.space ^ m.ident ^ m.strStop;
+        }
+        double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        printf("%-7s %6.2f GB/s (%llu)\n", name, buf.size() / s / 1e9, (unsigned long long) (sink & 1));
+    }
 }
