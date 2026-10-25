@@ -879,26 +879,7 @@ ret: {
         frames.pop_back();
         goto ret;
     case KIfOp:
-        if (kind() == PIPE_FROM) {
-            /* Right associative */
-            auto & chain = pipes.push();
-            chain.clear();
-            chain.emplace_back(0, r.e);
-            f.a = r;
-            f.k = KPipeFrom;
-            f.tok = &next();
-            minPrec = PImpl;
-            goto op;
-        }
-        if (kind() == PIPE_INTO) {
-            f.a = r;
-            f.k = KPipeInto;
-            f.tok = &next();
-            minPrec = PImpl;
-            goto op;
-        }
-        frames.pop_back();
-        goto ret;
+        goto ifOpRet;
     case KPipeFrom: {
         auto & chain = pipes.top();
         chain.emplace_back(f.tok->begin, r.e);
@@ -935,111 +916,20 @@ ret: {
         frames.pop_back();
         goto ret;
     case KOpLhs:
-        f.a = r;
-        f.lastNonAssoc = PNone;
-        goto opLoop;
+        goto opLhsRet;
     case KOpHasAttr:
         f.a.e = ex.add<ExprOpHasAttr>(ex.alloc, f.a.e, paths.top());
         paths.pop();
         f.lastNonAssoc = PNone;
         goto opLoop;
-    case KOpRhs: {
-        auto & op = *f.tok;
-        auto & lhs = f.a;
-        auto & rhs = r;
-        Prec p = precs[op.kind];
-        auto pos = at(op.begin);
-        Expr * e;
-        switch (+op.kind) {
-        case EQ:
-            e = ex.add<ExprOpEq>(pos, lhs.e, rhs.e);
-            break;
-        case NEQ:
-            e = ex.add<ExprOpNEq>(pos, lhs.e, rhs.e);
-            break;
-        case LT:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {lhs.e, rhs.e});
-            break;
-        case LEQ:
-            e = ex.add<ExprOpNot>(ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {rhs.e, lhs.e}));
-            break;
-        case GT:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {rhs.e, lhs.e});
-            break;
-        case GEQ:
-            e = ex.add<ExprOpNot>(ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {lhs.e, rhs.e}));
-            break;
-        case AND:
-            e = ex.add<ExprOpAnd>(pos, lhs.e, rhs.e);
-            break;
-        case OR:
-            e = ex.add<ExprOpOr>(pos, lhs.e, rhs.e);
-            break;
-        case IMPL:
-            e = ex.add<ExprOpImpl>(pos, lhs.e, rhs.e);
-            break;
-        case UPDATE:
-            e = ex.add<ExprOpUpdate>(pos, lhs.e, rhs.e);
-            break;
-        case PLUS:
-            e = ex.add<ExprConcatStrings>(ex.alloc, pos, false, {{at(lhs.begin), lhs.e}, {at(rhs.begin), rhs.e}});
-            break;
-        case MINUS:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.sub), {lhs.e, rhs.e});
-            break;
-        case STAR:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.mul), {lhs.e, rhs.e});
-            break;
-        case SLASH:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.div), {lhs.e, rhs.e});
-            break;
-        case CONCAT:
-            e = ex.add<ExprOpConcatLists>(pos, lhs.e, rhs.e);
-            break;
-        default:
-            unreachable();
-        }
-        lhs.e = e;
-        f.lastNonAssoc = nonAssoc(p) ? p : PNone;
-        goto opLoop;
-    }
+    case KOpRhs:
+        goto opRhsRet;
     case KAppFirst:
-        if (anyCursedOr)
-            r.e->resetCursedOr();
-        f.a = r;
-        f.b = r;
-        goto appLoop;
+        goto appFirstRet;
     case KAppArg:
-        if (st.imports && f.b.e == f.a.e)
-            if (auto var = dynamic_cast<ExprVar *>(f.b.e); var && var->name == sImport)
-                if (auto path = dynamic_cast<ExprPath *>(r.e))
-                    st.imports->push_back(path->v.path());
-        /* Past the first argument `f.b` is the call this built */
-        if (f.b.e != f.a.e)
-            static_cast<ExprCall *>(f.b.e)->args->push_back(r.e);
-        else
-            f.b.e = makeCall(at(f.a.begin), f.b.e, r.e);
-        warnIfCursedOr(r.e);
-        goto appLoop;
-    case KSelSimple: {
-        auto & tok = peek();
-        if (tok.kind == DOT) {
-            next();
-            f.a = r;
-            f.k = KSelPath;
-            goto attrPath;
-        }
-        if (tok.kind == OR_KW) {
-            next();
-            r = {
-                ex.add<ExprCall>(
-                    at(r.begin), r.e, {ex.add<ExprVar>(at(r.begin), st.s.or_)}, st.positions.add(st.origin, tok.end)),
-                r.begin};
-            anyCursedOr = true;
-        }
-        frames.pop_back();
-        goto ret;
-    }
+        goto appArgRet;
+    case KSelSimple:
+        goto selSimpleRet;
     case KSelPath:
         if (kind() == OR_KW) {
             next();
@@ -1049,14 +939,14 @@ ret: {
         r = {ex.add<ExprSelect>(ex.alloc, at(f.a.begin), f.a.e, paths.top(), nullptr), f.a.begin};
         paths.pop();
         frames.pop_back();
-        goto ret;
+        goto selectRet;
     case KSelDefault: {
         auto e = ex.add<ExprSelect>(ex.alloc, at(f.a.begin), f.a.e, paths.top(), r.e);
         warnIfCursedOr(r.e);
         paths.pop();
         r = {e, f.a.begin};
         frames.pop_back();
-        goto ret;
+        goto selectRet;
     }
     case KPathQuote:
         expect(QUOTE, {QUOTE});
@@ -1083,7 +973,7 @@ ret: {
         expect(QUOTE, {QUOTE});
         r = {rs.toExpr(ex), f.tok->begin};
         frames.pop_back();
-        goto ret;
+        goto selSimpleRet;
     case KIndDollar:
         expect(RBRACE, {RBRACE});
         indParts.top().emplace_back(at(f.tok2->begin), r.e);
@@ -1095,13 +985,13 @@ ret: {
         r = {ex.add<ExprConcatStrings>(ex.alloc, at(f.tok->begin), false, ps), f.tok->begin};
         parts.pop();
         frames.pop_back();
-        goto ret;
+        goto selSimpleRet;
     }
     case KParen:
         expect(RPAREN, {RPAREN});
         r = {r.e, f.tok->begin};
         frames.pop_back();
-        goto ret;
+        goto selSimpleRet;
     case KLetSet:
     case KRecSet: {
         expect(RBRACE, {INHERIT, RBRACE});
@@ -1113,7 +1003,7 @@ ret: {
         else
             r = {binds, f.tok->begin};
         frames.pop_back();
-        goto ret;
+        goto selSimpleRet;
     }
     case KSet: {
         expect(RBRACE, {INHERIT});
@@ -1121,7 +1011,7 @@ ret: {
         binds->pos = at(f.tok->begin);
         r = {binds, f.tok->begin};
         frames.pop_back();
-        goto ret;
+        goto selSimpleRet;
     }
     case KList:
         lists.top().push_back(r.e);
@@ -1192,6 +1082,165 @@ ret: {
     }
     unreachable();
 }
+
+    /* The continuations every atom returns through, out of the switch so
+       that a rule whose caller is known, or one of two or three, jumps
+       there directly instead of through the switch's indirect jump, which
+       mispredicts most of the time */
+ifOpRet: {
+    auto & f = top();
+    if (kind() == PIPE_FROM) {
+        /* Right associative */
+        auto & chain = pipes.push();
+        chain.clear();
+        chain.emplace_back(0, r.e);
+        f.a = r;
+        f.k = KPipeFrom;
+        f.tok = &next();
+        minPrec = PImpl;
+        goto op;
+    }
+    if (kind() == PIPE_INTO) {
+        f.a = r;
+        f.k = KPipeInto;
+        f.tok = &next();
+        minPrec = PImpl;
+        goto op;
+    }
+    frames.pop_back();
+    goto ret;
+}
+
+opLhsRet: {
+    auto & f = top();
+    f.a = r;
+    f.lastNonAssoc = PNone;
+    goto opLoop;
+}
+
+opRhsRet: {
+    auto & f = top();
+    auto & op = *f.tok;
+    auto & lhs = f.a;
+    auto & rhs = r;
+    Prec p = precs[op.kind];
+    auto pos = at(op.begin);
+    Expr * e;
+    switch (+op.kind) {
+    case EQ:
+        e = ex.add<ExprOpEq>(pos, lhs.e, rhs.e);
+        break;
+    case NEQ:
+        e = ex.add<ExprOpNEq>(pos, lhs.e, rhs.e);
+        break;
+    case LT:
+        e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {lhs.e, rhs.e});
+        break;
+    case LEQ:
+        e = ex.add<ExprOpNot>(ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {rhs.e, lhs.e}));
+        break;
+    case GT:
+        e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {rhs.e, lhs.e});
+        break;
+    case GEQ:
+        e = ex.add<ExprOpNot>(ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {lhs.e, rhs.e}));
+        break;
+    case AND:
+        e = ex.add<ExprOpAnd>(pos, lhs.e, rhs.e);
+        break;
+    case OR:
+        e = ex.add<ExprOpOr>(pos, lhs.e, rhs.e);
+        break;
+    case IMPL:
+        e = ex.add<ExprOpImpl>(pos, lhs.e, rhs.e);
+        break;
+    case UPDATE:
+        e = ex.add<ExprOpUpdate>(pos, lhs.e, rhs.e);
+        break;
+    case PLUS:
+        e = ex.add<ExprConcatStrings>(ex.alloc, pos, false, {{at(lhs.begin), lhs.e}, {at(rhs.begin), rhs.e}});
+        break;
+    case MINUS:
+        e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.sub), {lhs.e, rhs.e});
+        break;
+    case STAR:
+        e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.mul), {lhs.e, rhs.e});
+        break;
+    case SLASH:
+        e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.div), {lhs.e, rhs.e});
+        break;
+    case CONCAT:
+        e = ex.add<ExprOpConcatLists>(pos, lhs.e, rhs.e);
+        break;
+    default:
+        unreachable();
+    }
+    lhs.e = e;
+    f.lastNonAssoc = nonAssoc(p) ? p : PNone;
+    goto opLoop;
+}
+
+appFirstRet: {
+    auto & f = top();
+    if (anyCursedOr)
+        r.e->resetCursedOr();
+    f.a = r;
+    f.b = r;
+    goto appLoop;
+}
+
+appArgRet: {
+    auto & f = top();
+    if (st.imports && f.b.e == f.a.e)
+        if (auto var = dynamic_cast<ExprVar *>(f.b.e); var && var->name == sImport)
+            if (auto path = dynamic_cast<ExprPath *>(r.e))
+                st.imports->push_back(path->v.path());
+    /* Past the first argument `f.b` is the call this built */
+    if (f.b.e != f.a.e)
+        static_cast<ExprCall *>(f.b.e)->args->push_back(r.e);
+    else
+        f.b.e = makeCall(at(f.a.begin), f.b.e, r.e);
+    warnIfCursedOr(r.e);
+    goto appLoop;
+}
+
+selSimpleRet: {
+    auto & f = top();
+    auto & tok = peek();
+    if (tok.kind == DOT) {
+        next();
+        f.a = r;
+        f.k = KSelPath;
+        goto attrPath;
+    }
+    if (tok.kind == OR_KW) {
+        next();
+        r = {
+            ex.add<ExprCall>(
+                at(r.begin), r.e, {ex.add<ExprVar>(at(r.begin), st.s.or_)}, st.positions.add(st.origin, tok.end)),
+            r.begin};
+        anyCursedOr = true;
+    }
+    frames.pop_back();
+    goto selectRet;
+}
+
+    /* What called `select`: the head or an argument of an application, a
+       list element, or the default of an `or` */
+selectRet:
+    if (top().k == KAppArg)
+        goto appArgRet;
+    if (top().k == KAppFirst)
+        goto appFirstRet;
+    goto ret;
+
+    /* What called `op`: mostly `exprIf`, or an operator's left side */
+opRet:
+    if (top().k == KIfOp)
+        goto ifOpRet;
+    if (top().k == KOpRhs)
+        goto opRhsRet;
+    goto ret;
 
     /* expr: function
 
@@ -1273,7 +1322,7 @@ opLoop: {
     if (p == PNone || p < f.minPrec) {
         r = f.a;
         frames.pop_back();
-        goto ret;
+        goto opRet;
     }
     if (p == f.lastNonAssoc)
         syntaxError(opTok);
@@ -1314,7 +1363,9 @@ appLoop:
     }
     r = {top().b.e, top().a.begin};
     frames.pop_back();
-    goto ret;
+    /* `unary` is only entered from `op` */
+    assert(top().k == KOpLhs);
+    goto opLhsRet;
 
     /* expr_select: expr_simple '.' attrpath ['or' expr_select]
        | expr_simple OR_KW | expr_simple */
@@ -1400,16 +1451,16 @@ simple: {
             r = {ex.add<ExprPos>(at(tok.begin)), tok.begin};
         else
             r = {ex.add<ExprVar>(at(tok.begin), sym(tok)), tok.begin};
-        goto ret;
+        goto selSimpleRet;
     }
     case INT_LIT:
         next();
         r = {ex.add<ExprInt>(NixInt(int64_t(tk.numbers[tok.aux]))), tok.begin};
-        goto ret;
+        goto selSimpleRet;
     case FLOAT_LIT:
         next();
         r = {ex.add<ExprFloat>(std::bit_cast<double>(tk.numbers[tok.aux])), tok.begin};
-        goto ret;
+        goto selSimpleRet;
     case QUOTE:
         next();
         push(KSimpleQuote, &tok);
@@ -1426,7 +1477,7 @@ simple: {
         if (kind() == PATH_END) {
             next();
             r = {start, tok.begin};
-            goto ret;
+            goto selSimpleRet;
         }
         /* The grammar only takes a literal segment before an interpolation */
         if (kind() == STR && kindAt(1) != DOLLAR_CURLY)
@@ -1446,7 +1497,7 @@ simple: {
                 ex.add<ExprVar>(st.s.findFile),
                 {ex.add<ExprVar>(st.s.nixPath), ex.add<ExprString>(ex.alloc, path)}),
             tok.begin};
-        goto ret;
+        goto selSimpleRet;
     }
     case URI: {
         next();
@@ -1460,7 +1511,7 @@ simple: {
                  .pos = st.positions[at(tok.begin)]});
         });
         r = {ex.add<ExprString>(ex.alloc, s), tok.begin};
-        goto ret;
+        goto selSimpleRet;
     }
     case LPAREN:
         next();
@@ -1478,7 +1529,7 @@ simple: {
         if (kind() == RBRACE) {
             next();
             r = {ex.add<ExprAttrs>(ex.alloc, at(tok.begin)), tok.begin};
-            goto ret;
+            goto selSimpleRet;
         }
         push(KSet, &tok);
         bindsCtx = Braces;
@@ -1510,7 +1561,7 @@ indLoop: {
     r = {st.stripIndentation(at(top().tok->begin), indParts.top()), top().tok->begin};
     indParts.pop();
     frames.pop_back();
-    goto ret;
+    goto selSimpleRet;
 }
 
     /* The frame is KList */
@@ -1521,7 +1572,7 @@ listLoop:
     r = {ex.add<ExprList>(ex.alloc, lists.top()), top().tok->begin};
     lists.pop();
     frames.pop_back();
-    goto ret;
+    goto selSimpleRet;
 
     /* binds, with the context in `bindsCtx`, into an ExprAttrs in `r` */
 binds: {
