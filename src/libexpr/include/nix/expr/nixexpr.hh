@@ -434,6 +434,13 @@ struct ExprAttrs : Expr
         : recursive(false)
         , attrs(AttrDefs{})
         , dynamicAttrs(DynamicAttrDefs{}) {};
+    /* In `alloc` from the start, so that `moveDataToAllocator` has nothing
+       to copy */
+    ExprAttrs(std::pmr::polymorphic_allocator<char> & alloc, const PosIdx & pos = noPos)
+        : recursive(false)
+        , pos(pos)
+        , attrs(AttrDefs{alloc})
+        , dynamicAttrs(DynamicAttrDefs{alloc}) {};
 
     PosIdx getPos() const override
     {
@@ -609,7 +616,7 @@ struct ExprCall : Expr
 
     ExprCall(const PosIdx & pos, Expr * fun, std::pmr::vector<Expr *> && args)
         : fun(fun)
-        , args(args)
+        , args(std::move(args))
         , pos(pos)
         , cursedOrEndPos({})
     {
@@ -617,7 +624,7 @@ struct ExprCall : Expr
 
     ExprCall(const PosIdx & pos, Expr * fun, std::pmr::vector<Expr *> && args, PosIdx && cursedOrEndPos)
         : fun(fun)
-        , args(args)
+        , args(std::move(args))
         , pos(pos)
         , cursedOrEndPos(cursedOrEndPos)
     {
@@ -855,7 +862,15 @@ public:
     C * add(const PosIdx & pos, Expr * fun, std::pmr::vector<Expr *> && args)
         requires(std::same_as<C, ExprCall>)
     {
-        return alloc.new_object<C>(pos, fun, std::move(args));
+        return alloc.new_object<C>(pos, fun, std::pmr::vector<Expr *>(std::move(args), alloc));
+    }
+
+    template<class C>
+    [[gnu::always_inline]]
+    C * add(const PosIdx & pos, Expr * fun, std::initializer_list<Expr *> args)
+        requires(std::same_as<C, ExprCall>)
+    {
+        return alloc.new_object<C>(pos, fun, std::pmr::vector<Expr *>(args, alloc));
     }
 
     template<class C>
@@ -863,7 +878,16 @@ public:
     C * add(const PosIdx & pos, Expr * fun, std::pmr::vector<Expr *> && args, PosIdx && cursedOrEndPos)
         requires(std::same_as<C, ExprCall>)
     {
-        return alloc.new_object<C>(pos, fun, std::move(args), std::move(cursedOrEndPos));
+        return alloc.new_object<C>(
+            pos, fun, std::pmr::vector<Expr *>(std::move(args), alloc), std::move(cursedOrEndPos));
+    }
+
+    template<class C>
+    [[gnu::always_inline]]
+    C * add(const PosIdx & pos, Expr * fun, std::initializer_list<Expr *> args, PosIdx && cursedOrEndPos)
+        requires(std::same_as<C, ExprCall>)
+    {
+        return alloc.new_object<C>(pos, fun, std::pmr::vector<Expr *>(args, alloc), std::move(cursedOrEndPos));
     }
 
     template<class C>

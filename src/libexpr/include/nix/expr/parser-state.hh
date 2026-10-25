@@ -229,11 +229,11 @@ inline void ParserState::addAttr(
                     dupAttr(attrPath, pos, j->second.pos);
                 }
             } else {
-                nested = exprs.add<ExprAttrs>();
+                nested = exprs.add<ExprAttrs>(exprs.alloc);
                 (*attrs->attrs)[i->symbol] = ExprAttrs::AttrDef(nested, pos);
             }
         } else {
-            nested = exprs.add<ExprAttrs>();
+            nested = exprs.add<ExprAttrs>(exprs.alloc);
             attrs->dynamicAttrs->push_back(ExprAttrs::DynamicAttrDef(i->expr, nested, pos));
         }
         attrs = nested;
@@ -279,7 +279,7 @@ ParserState::addAttr(ExprAttrs * attrs, AttrSelectionPath & attrPath, const Symb
         // See https://github.com/NixOS/nix/issues/9020.
         if (jAttrs && ae) {
             if (ae->inheritFromExprs && !jAttrs->inheritFromExprs)
-                jAttrs->inheritFromExprs = std::make_unique<std::pmr::vector<Expr *>>();
+                jAttrs->inheritFromExprs = std::make_unique<std::pmr::vector<Expr *>>(exprs.alloc);
             for (auto & ad : *ae->attrs) {
                 if (ad.second.kind == ExprAttrs::AttrDef::Kind::InheritedFrom) {
                     auto & sel = dynamic_cast<ExprSelect &>(*ad.second.e);

@@ -1139,7 +1139,7 @@ ret: {
             bs.record->push_back(Binding{.path = std::move(paths.top()), .begin = f.tok->begin, .e = r});
         else {
             if (!bs.attrs)
-                bs.attrs = ex.add<ExprAttrs>();
+                bs.attrs = ex.add<ExprAttrs>(ex.alloc);
             st.addAttr(
                 bs.attrs,
                 std::move(paths.top()),
@@ -1474,7 +1474,7 @@ simple: {
         next();
         if (kind() == RBRACE) {
             next();
-            r = {ex.add<ExprAttrs>(at(tok.begin)), tok.begin};
+            r = {ex.add<ExprAttrs>(ex.alloc, at(tok.begin)), tok.begin};
             goto ret;
         }
         push(KSet, &tok);
@@ -1578,7 +1578,7 @@ bindsEnd: {
         }
     }
     if (!bs.attrs)
-        bs.attrs = ex.add<ExprAttrs>();
+        bs.attrs = ex.add<ExprAttrs>(ex.alloc);
     r = {bs.attrs, 0};
     bindsStack.pop();
     goto ret;
@@ -1613,7 +1613,7 @@ inheritNames: {
         bs.record->push_back(Binding{.inherit = std::move(inherits.top())});
     else {
         if (!bs.attrs)
-            bs.attrs = ex.add<ExprAttrs>();
+            bs.attrs = ex.add<ExprAttrs>(ex.alloc);
         addInherit(bs.attrs, std::move(inherits.top()));
     }
     inherits.pop();
@@ -1836,7 +1836,7 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
         if (st.imports)
             st.imports->insert(st.imports->end(), r.imports.begin(), r.imports.end());
         if (!attrs && !r.bindings.empty())
-            attrs = st.exprs.add<ExprAttrs>();
+            attrs = st.exprs.add<ExprAttrs>(st.exprs.alloc);
         for (auto & b : r.bindings) {
             if (b.inherit)
                 addInherit(attrs, std::move(*b.inherit));
@@ -1868,7 +1868,7 @@ void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
     }
 
     if (!attrs->inheritFromExprs)
-        attrs->inheritFromExprs = std::make_unique<std::pmr::vector<Expr *>>();
+        attrs->inheritFromExprs = std::make_unique<std::pmr::vector<Expr *>>(st.exprs.alloc);
     attrs->inheritFromExprs->push_back(inherit.from);
     auto fromExpr = st.exprs.add<ExprInheritFrom>(at(inherit.fromBegin), attrs->inheritFromExprs->size() - 1);
     for (auto & [i, iPos] : inherit.names) {
