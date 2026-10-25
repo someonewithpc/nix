@@ -545,11 +545,21 @@ public:
        length */
     static uint32_t unescape(char * text, uint32_t len, bool & nullByte)
     {
+        static const simd::EscapeFinder findEscape = simd::pickEscapeFinder();
         char * t = text;
         const char * c = text;
         const char * e = text + len;
         nullByte = false;
         while (c < e) {
+            /* Up to the next byte that changes, which for most strings is
+               none */
+            size_t run = findEscape(c, e - c);
+            if (t != c)
+                memmove(t, c, run);
+            t += run;
+            c += run;
+            if (c == e)
+                break;
             char ch = *c++;
             nullByte |= ch == '\0';
             if (ch == '\\') {
