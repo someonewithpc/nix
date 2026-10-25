@@ -14,6 +14,7 @@
   sqlite,
   toml11,
   libcpuid,
+  liburing,
 
   # Configuration Options
 
@@ -62,7 +63,8 @@ mkMesonLibrary (finalAttrs: {
     sqlite
     toml11
   ]
-  ++ lib.optional stdenv.hostPlatform.isx86_64 libcpuid;
+  ++ lib.optional stdenv.hostPlatform.isx86_64 libcpuid
+  ++ lib.optional stdenv.hostPlatform.isLinux liburing;
 
   propagatedBuildInputs = [
     nix-util

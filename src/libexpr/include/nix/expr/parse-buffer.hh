@@ -2,7 +2,11 @@
 ///@file
 
 #include <cstddef>
+#include <exception>
+#include <span>
 #include <string_view>
+#include <variant>
+#include <vector>
 
 #include "nix/util/source-path.hh"
 
@@ -55,5 +59,12 @@ public:
  * `path` should have its symlinks resolved already
  */
 ParseBuffer readParseBuffer(const SourcePath & path);
+
+/**
+ * Read several files at once: one io_uring submission opens, reads and
+ * closes a batch of them where the kernel allows it. Each result is the
+ * file's buffer, or what reading it threw
+ */
+std::vector<std::variant<ParseBuffer, std::exception_ptr>> readParseBuffers(std::span<const SourcePath> paths);
 
 } // namespace nix

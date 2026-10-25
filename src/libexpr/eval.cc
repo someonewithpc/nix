@@ -345,57 +345,85 @@ struct ImportPrefetcher
                 GC_unregister_my_thread();
         });
 #endif
+        std::vector<SourcePath> batch;
         while (true) {
-            SourcePath path{state.rootFS};
+            batch.clear();
             {
                 std::unique_lock lock(m);
                 wake.wait(lock, [&] { return stop || !queue.empty(); });
                 if (stop)
                     return;
-                path = std::move(queue.front());
-                queue.pop_front();
+                /* A few at a time, so that one io_uring submission reads
+                   them all, but few enough that the evaluator seldom waits
+                   for a file that is behind others in the batch */
+                while (!queue.empty() && batch.size() < 8) {
+                    batch.push_back(std::move(queue.front()));
+                    queue.pop_front();
+                }
             }
-            parse(path);
+            parse(batch);
         }
     }
 
-    void parse(const SourcePath & path)
+    static void finish(File & f, Expr * e)
     {
-        std::shared_ptr<File> f;
-        try {
-            auto resolved = resolveExprPath(path);
-            state.importResolutionCache->emplace(path, resolved);
-            {
-                std::lock_guard lock(m);
-                auto [i, added] = files.try_emplace(resolved, nullptr);
-                if (!added)
-                    return;
-                i->second = f = std::make_shared<File>();
-            }
-            auto buffer = readParseBuffer(resolved.resolveSymlinks());
-            f->e = parseExprFromBuf(
-                buffer,
-                Pos::Origin(resolved),
-                resolved.parent(),
-                state.mem.exprs,
-                state.symbols,
-                state.settings,
-                state.positions,
-                *f->docComments,
-                state.rootFS,
-                &f->imports,
-                true);
-        } catch (...) {
-            if (f)
-                f->e = nullptr;
-        }
-        if (!f)
-            return;
         {
-            std::lock_guard lock(f->m);
-            f->done = true;
+            std::lock_guard lock(f.m);
+            f.e = e;
+            f.done = true;
         }
-        f->cv.notify_all();
+        f.cv.notify_all();
+    }
+
+    void parse(const std::vector<SourcePath> & batch)
+    {
+        std::vector<std::shared_ptr<File>> claimed;
+        std::vector<SourcePath> resolved, physical;
+        for (auto & path : batch) {
+            std::shared_ptr<File> f;
+            try {
+                auto r = resolveExprPath(path);
+                state.importResolutionCache->emplace(path, r);
+                {
+                    std::lock_guard lock(m);
+                    auto [i, added] = files.try_emplace(r, nullptr);
+                    if (!added)
+                        continue;
+                    i->second = f = std::make_shared<File>();
+                }
+                physical.push_back(r.resolveSymlinks());
+                resolved.push_back(std::move(r));
+                claimed.push_back(std::move(f));
+            } catch (...) {
+                if (f)
+                    finish(*f, nullptr);
+            }
+        }
+
+        auto buffers = readParseBuffers(physical);
+        for (size_t i = 0; i < claimed.size(); i++) {
+            auto & f = *claimed[i];
+            Expr * e = nullptr;
+            if (auto buf = std::get_if<ParseBuffer>(&buffers[i]))
+                try {
+                    e = parseExprFromBuf(
+                        *buf,
+                        Pos::Origin(resolved[i]),
+                        resolved[i].parent(),
+                        state.mem.exprs,
+                        state.symbols,
+                        state.settings,
+                        state.positions,
+                        *f.docComments,
+                        state.rootFS,
+                        &f.imports,
+                        true);
+                } catch (...) {
+                }
+            /* The parse needs the buffer no longer */
+            buffers[i] = std::exception_ptr();
+            finish(f, e);
+        }
     }
 };
 
