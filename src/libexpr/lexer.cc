@@ -387,7 +387,7 @@ private:
 
     /* Stop at the first error: the parser throws when it gets there, and
        the flex lexer never got past it */
-    bool error(LexError::Kind k, uint32_t offset, std::string text = {})
+    [[gnu::noinline, gnu::cold]] bool error(LexError::Kind k, uint32_t offset, std::string text = {})
     {
         out.errors.push_back(LexError{k, offset, std::move(text)});
         emit(LEX_ERROR, Raw, out.errors.size() - 1);
@@ -598,7 +598,7 @@ private:
         return true;
     }
 
-    bool number(Kind k, uint32_t p, uint32_t len)
+    [[gnu::noinline]] bool number(Kind k, uint32_t p, uint32_t len)
     {
         std::string_view text(s + p, len);
         if (k == INT_LIT) {
@@ -628,7 +628,10 @@ private:
         return true;
     }
 
-    bool lexDefault(uint32_t & p);
+    /* The common tokens, inlined into the loop of `runTo` */
+    [[gnu::always_inline]] bool lexDefault(uint32_t & p);
+    /* The rest, which need the longest-match machinery and a big frame */
+    [[gnu::noinline]] bool lexDefaultSlow(uint32_t & p, unsigned char c);
     bool lexString(uint32_t & p);
     bool lexIndString(uint32_t & p);
     bool lexInPath(uint32_t & p);
@@ -702,10 +705,9 @@ public:
     }
 };
 
-bool Lexer::lexDefault(uint32_t & p)
+inline bool Lexer::lexDefault(uint32_t & p)
 {
     unsigned char c = s[p];
-    Match m;
 
     /* The whitespace before a token, lexed in the same call as the token
        unless it reaches where `runTo` has to look */
@@ -801,6 +803,13 @@ bool Lexer::lexDefault(uint32_t & p)
     default:
         break;
     }
+
+    return lexDefaultSlow(p, c);
+}
+
+bool Lexer::lexDefaultSlow(uint32_t & p, unsigned char c)
+{
+    Match m;
 
     switch (+c) {
     case '#': {
