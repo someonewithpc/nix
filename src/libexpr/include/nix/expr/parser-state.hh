@@ -393,8 +393,11 @@ ParserState::stripIndentation(const PosIdx pos, std::span<std::pair<PosIdx, std:
         }
     }
 
-    /* Strip spaces from each line. */
-    std::vector<std::pair<PosIdx, Expr *>> es2{};
+    /* Strip spaces from each line, into buffers that stay allocated for
+       the next string; ExprString and ExprConcatStrings copy them */
+    thread_local std::vector<std::pair<PosIdx, Expr *>> es2;
+    thread_local std::string s2;
+    es2.clear();
     atStartOfLine = true;
     size_t curDropped = 0;
     size_t n = es.size();
@@ -405,8 +408,7 @@ ParserState::stripIndentation(const PosIdx pos, std::span<std::pair<PosIdx, std:
         es2.emplace_back(i->first, e);
     };
     const auto trimString = [&](const StringToken & t) {
-        std::string s2;
-        s2.reserve(t.l);
+        s2.clear();
         const char * c = t.p;
         const char * e = t.p + t.l;
         while (c < e) {
@@ -445,7 +447,7 @@ ParserState::stripIndentation(const PosIdx pos, std::span<std::pair<PosIdx, std:
         if (n == 1) {
             std::string::size_type p = s2.find_last_of('\n');
             if (p != std::string::npos && s2.find_first_not_of(' ', p + 1) == std::string::npos)
-                s2 = std::string(s2, 0, p + 1);
+                s2.resize(p + 1);
         }
 
         // Ignore empty strings for a minor optimisation and AST simplification
@@ -459,17 +461,21 @@ ParserState::stripIndentation(const PosIdx pos, std::span<std::pair<PosIdx, std:
 
     // If there is nothing at all, return the empty string directly.
     // This also ensures that equivalent empty strings result in the same ast, which is helpful when testing formatters.
-    if (es2.size() == 0) {
-        auto * const result = exprs.add<ExprString>(""_sds);
-        return result;
-    }
-
+    Expr * result;
+    if (es2.size() == 0)
+        result = exprs.add<ExprString>(""_sds);
     /* If this is a single string, then don't do a concatenation. */
-    if (es2.size() == 1 && dynamic_cast<ExprString *>((es2)[0].second)) {
-        auto * const result = (es2)[0].second;
-        return result;
-    }
-    return exprs.add<ExprConcatStrings>(exprs.alloc, pos, true, es2);
+    else if (es2.size() == 1 && dynamic_cast<ExprString *>((es2)[0].second))
+        result = (es2)[0].second;
+    else
+        result = exprs.add<ExprConcatStrings>(exprs.alloc, pos, true, es2);
+
+    /* Keep what ordinary strings need, not what a huge one grew */
+    if (s2.capacity() > (size_t(1) << 16))
+        s2 = std::string();
+    if (es2.capacity() > 4096)
+        es2 = {};
+    return result;
 }
 
 inline PosIdx LexerState::at(const ParserLocation & loc)
