@@ -11,6 +11,6 @@ for i in $(seq "${3:-3}"); do
   for side in prev cur; do
     lib=$PWD/outputs/out/lib
     [ $side = prev ] && lib=$PWD/bench/run/lib-prev
-    echo "$side $(LD_LIBRARY_PATH=$lib NIX_LEXER_THREADS=1 NIX_PARSER_THREADS=1 bench/run/bench-dev "$1" "${2:-5}" 2>/dev/null | grep ^lex)"
+    echo "$side $(LD_LIBRARY_PATH=$lib NIX_LEXER_THREADS=1 NIX_PARSER_THREADS=1 bench/run/bench-dev "$1" "${2:-5}" 2>/dev/null | grep -E '^(lex|bind)' | tr -s ' ' | tr '\n' ' ')"
   done
 done
