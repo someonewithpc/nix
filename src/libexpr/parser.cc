@@ -93,8 +93,32 @@ constexpr auto simpleStarts = makeSimpleStarts();
    put the location of the nonterminal */
 struct E
 {
-    Expr * e;
-    uint32_t begin;
+    Expr * e = nullptr;
+    uint32_t begin = 0;
+
+    E() = default;
+
+    E(Expr * e, uint32_t begin)
+        : e(e)
+        , begin(begin)
+    {
+    }
+
+    /* Field by field. The parser mostly writes `r` a field at a time, and
+       a copy as one 16-byte load stalls on store forwarding: that was a
+       third of the time in Parser::run */
+    E(const E & o)
+        : e(o.e)
+        , begin(o.begin)
+    {
+    }
+
+    E & operator=(const E & o)
+    {
+        e = o.e;
+        begin = o.begin;
+        return *this;
+    }
 };
 
 /* Interning through the shared table is a concurrent hash map operation,
