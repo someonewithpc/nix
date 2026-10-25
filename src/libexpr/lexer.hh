@@ -97,6 +97,9 @@ enum StrFlavour : uint8_t {
     Indented,
     /** `$`, `''` or `'` from an indented string, as a `Lit` in `aux` */
     Literal,
+    /** Still to be unescaped: the value is the last `aux` bytes of the
+        token. Only the lexer sees these */
+    Escaped,
 };
 
 enum Lit : uint32_t { LitDollar, LitQuotes, LitQuote };

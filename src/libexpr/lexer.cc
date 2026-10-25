@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <thread>
 
 #include "nix/util/util.hh"
 
@@ -61,6 +62,9 @@ enum State : uint8_t {
     IndString,
     InPath,
     InPathSlash,
+    /* On the stack of a speculative lexer: whatever state the chunk
+       started in */
+    Unknown,
 };
 
 /* The order of the flex rules, which breaks ties between matches of equal
@@ -210,8 +214,31 @@ class Lexer
     LexerState & ls;
     Tokens out;
 
+public:
     State state = Initial;
     std::vector<State> stack;
+    uint32_t pos = 0;
+    uint32_t start = 0;
+    /* Past an error or the end of the input */
+    bool done = false;
+
+    /* Lexing a chunk that starts at a line in some default state that is
+       not known yet; see `lexParallel` */
+    bool spec = false;
+    /* Leave escapes for later, so that lexers running on other parts of
+       the buffer never see it change */
+    bool defer = false;
+    /* The `}` tokens of a speculative lexer that popped past the start of
+       its chunk */
+    std::vector<uint32_t> underflows;
+    /* A speculative lexer counts `docDistance` up from here, which tells
+       distances from the chunk apart from ones that need the distance at
+       its start */
+    static constexpr int64_t specBase = int64_t(1) << 40;
+    /* The rules that see a distance of `specBase` plus 0 or 1: whether they
+       record a doc comment depends on the distance at the start */
+    std::vector<std::pair<int64_t, PosIdx>> docCandidates;
+private:
 
     /* The flex location, including its stash, which `yyless(0)` rules
        restore */
@@ -221,15 +248,22 @@ class Lexer
 
     void push(State st)
     {
-        stack.push_back(state);
+        stack.push_back(spec && stack.empty() ? Unknown : state);
         state = st;
     }
 
     void pop()
     {
+        if (spec && stack.empty()) {
+            underflows.push_back(out.tokens.size());
+            state = Default;
+            return;
+        }
         assert(!stack.empty());
         state = stack.back();
         stack.pop_back();
+        if (state == Unknown)
+            state = Default;
     }
 
     /* `adjustLoc`, run before the action of every matched rule */
@@ -240,7 +274,8 @@ class Lexer
             ParserLocation doc{ls.lastDocCommentLoc.beginOffset, 0, 0, 0};
             ParserLocation docEnd{ls.lastDocCommentLoc.endOffset, 0, 0, 0};
             ls.positionToDocComment.emplace(ls.at(loc), DocComment{ls.at(doc), ls.at(docEnd)});
-        }
+        } else if (spec && docDistance >= specBase && docDistance <= specBase + 1)
+            docCandidates.emplace_back(docDistance - specBase, ls.at(loc));
         docDistance++;
         loc.beginOffset = loc.endOffset;
         loc.endOffset += len;
@@ -416,13 +451,14 @@ class Lexer
         return 0;
     }
 
+public:
     /* In place, as `unescapeStr` in the flex lexer did; returns the new
        length */
-    uint32_t unescape(uint32_t p, uint32_t len, bool & nullByte)
+    static uint32_t unescape(char * text, uint32_t len, bool & nullByte)
     {
-        char * t = s + p;
-        const char * c = s + p;
-        const char * e = s + p + len;
+        char * t = text;
+        const char * c = text;
+        const char * e = text + len;
         nullByte = false;
         while (c < e) {
             char ch = *c++;
@@ -437,15 +473,26 @@ class Lexer
             } else
                 *t++ = ch;
         }
-        return t - (s + p);
+        return t - text;
     }
+
+private:
 
     /* Emit an unescaped string token over the current location, whose
        value starts at `p` */
     bool emitUnescaped(Kind k, uint32_t p, uint32_t len)
     {
         bool nullByte;
-        uint32_t l = unescape(p, len, nullByte);
+        if (defer) {
+            if (!memchr(s + p, 0, len)) {
+                emit(k, Escaped, len);
+                return true;
+            }
+            std::string copy(s + p, len);
+            copy.resize(unescape(copy.data(), len, nullByte));
+            return error(LexError::NullByte, loc.beginOffset, std::move(copy));
+        }
+        uint32_t l = unescape(s + p, len, nullByte);
         if (nullByte)
             return error(LexError::NullByte, loc.beginOffset, std::string(s + p, l));
         emit(k, Unescaped, l);
@@ -494,10 +541,55 @@ public:
         , ls(ls)
         , classify(classifier())
     {
-        out.tokens.reserve(n / 4 + 16);
     }
 
     Tokens run(bool replBindings);
+
+    /* Lex until `pos` reaches `limit`, or to the end of the input when
+       `limit` is `n`; false once the lexer is done */
+    bool runTo(uint32_t limit);
+
+    /* Start a speculative lexer at `p`, the first token of a line */
+    void startChunk(uint32_t p)
+    {
+        spec = true;
+        defer = true;
+        state = Default;
+        pos = p;
+        start = p;
+        uint32_t b = p;
+        while (b > 0 && is(s[b - 1], Space))
+            b--;
+        /* After the whitespace rule, which is the only one that can end
+           here if the guess is right */
+        loc = ParserLocation{int(b), int(p), int(b), int(p)};
+        docDistance = specBase;
+    }
+
+    void reserve(uint32_t bytes)
+    {
+        out.tokens.reserve(bytes / 4 + 16);
+    }
+
+    /* Take over the tokens of the speculative lexer of the chunk that
+       starts where this one stopped, if its guesses hold */
+    bool append(Lexer & c);
+
+    Tokens take()
+    {
+        return std::move(out);
+    }
+
+    /* Unescape the strings that `defer` left */
+    void unescapeDeferred()
+    {
+        for (auto & t : out.tokens)
+            if (t.flavour == Escaped) {
+                bool nullByte;
+                t.aux = unescape(s + t.end - t.aux, t.aux, nullByte);
+                t.flavour = Unescaped;
+            }
+    }
 };
 
 bool Lexer::lexDefault(uint32_t & p)
@@ -930,16 +1022,22 @@ bool Lexer::lexInPath(uint32_t & p)
 
 Tokens Lexer::run(bool replBindings)
 {
-    uint32_t p = 0;
-
+    reserve(n);
     if (replBindings && n > 0) {
         adjust(1);
         loc.unstash();
         emit(REPL_BINDINGS);
     }
+    runTo(n);
+    return std::move(out);
+}
 
-    while (true) {
-        if (p >= n) {
+bool Lexer::runTo(uint32_t limit)
+{
+    while (!done) {
+        if (pos >= limit && limit < n)
+            return true;
+        if (pos >= n) {
             /* The `<<EOF>>` rules, which do not adjust the location */
             switch (+state) {
             case InPath:
@@ -949,10 +1047,12 @@ Tokens Lexer::run(bool replBindings)
                 continue;
             case InPathSlash:
                 error(LexError::TrailingSlash, loc.beginOffset);
-                return std::move(out);
+                done = true;
+                return false;
             default:
                 emit(EOF_);
-                return std::move(out);
+                done = true;
+                return false;
             }
         }
 
@@ -960,22 +1060,165 @@ Tokens Lexer::run(bool replBindings)
         switch (+state) {
         case Initial:
         case Default:
-            more = lexDefault(p);
+            more = lexDefault(pos);
             break;
         case String:
-            more = lexString(p);
+            more = lexString(pos);
             break;
         case IndString:
-            more = lexIndString(p);
+            more = lexIndString(pos);
             break;
         case InPath:
         case InPathSlash:
-            more = lexInPath(p);
+            more = lexInPath(pos);
             break;
+        default:
+            assert(false);
         }
         if (!more)
-            return std::move(out);
+            done = true;
     }
+    return false;
+}
+
+bool Lexer::append(Lexer & c)
+{
+    if (done || pos != c.start || (state != Default && state != Initial))
+        return false;
+
+    /* Replay the pops past the start of the chunk on the real stack; each
+       must land in a default state for the chunk to have been lexed right */
+    auto realStack = stack;
+    State bottom = state;
+    for (size_t i = 0; i < c.underflows.size(); i++) {
+        if (bottom == Initial)
+            continue;
+        assert(!realStack.empty());
+        bottom = realStack.back();
+        realStack.pop_back();
+        if (bottom != Default && bottom != Initial)
+            return false;
+    }
+
+    if (c.stack.empty())
+        state = bottom;
+    else {
+        assert(c.stack.front() == Unknown);
+        realStack.push_back(bottom);
+        realStack.insert(realStack.end(), c.stack.begin() + 1, c.stack.end());
+        state = c.state;
+    }
+    stack = std::move(realStack);
+
+    for (auto & [r, key] : c.docCandidates)
+        if (docDistance + r == 1) {
+            ParserLocation doc{ls.lastDocCommentLoc.beginOffset, 0, 0, 0};
+            ParserLocation docEnd{ls.lastDocCommentLoc.endOffset, 0, 0, 0};
+            ls.positionToDocComment.emplace(key, DocComment{ls.at(doc), ls.at(docEnd)});
+        }
+    for (auto & [key, doc] : c.ls.positionToDocComment)
+        ls.positionToDocComment.emplace(key, doc);
+    if (c.docDistance >= specBase / 2)
+        docDistance += c.docDistance - specBase;
+    else {
+        docDistance = c.docDistance;
+        ls.lastDocCommentLoc = c.ls.lastDocCommentLoc;
+    }
+
+    uint32_t numbers = out.numbers.size();
+    uint32_t errors = out.errors.size();
+    out.tokens.reserve(out.tokens.size() + c.out.tokens.size());
+    for (auto t : c.out.tokens) {
+        if (t.kind == INT_LIT || t.kind == FLOAT_LIT)
+            t.aux += numbers;
+        else if (t.kind == LEX_ERROR)
+            t.aux += errors;
+        out.tokens.push_back(t);
+    }
+    out.numbers.insert(out.numbers.end(), c.out.numbers.begin(), c.out.numbers.end());
+    for (auto & e : c.out.errors)
+        out.errors.push_back(std::move(e));
+
+    loc = c.loc;
+    pos = c.pos;
+    done = c.done;
+    return true;
+}
+
+/* Below this a file is lexed on one thread */
+uint32_t minChunk()
+{
+    static const uint32_t v = [] {
+        auto e = getenv("NIX_LEXER_MIN_CHUNK");
+        return e ? uint32_t(std::stoul(e)) : uint32_t(1) << 20;
+    }();
+    return v;
+}
+
+unsigned maxChunks()
+{
+    static const unsigned v = [] {
+        if (auto e = getenv("NIX_LEXER_THREADS"))
+            return unsigned(std::stoul(e));
+        return std::max(1u, std::thread::hardware_concurrency() * 3 / 4);
+    }();
+    return v;
+}
+
+/* Split the input at the first tokens of lines and lex every chunk at
+   once, each one guessing that it starts in a default state. The chunks
+   are then joined in order: a chunk whose guess held is taken as it is,
+   and one whose guess did not is lexed again from where the previous one
+   stopped */
+Tokens lexParallel(char * text, uint32_t length, LexerState & ls, unsigned chunks)
+{
+    std::vector<uint32_t> cuts{0};
+    for (unsigned k = 1; k < chunks; k++) {
+        uint32_t c = std::max(uint32_t(uint64_t(length) * k / chunks), cuts.back() + 1);
+        auto nl = static_cast<const char *>(memchr(text + c - 1, '\n', length - (c - 1)));
+        c = nl ? nl - text + 1 : length;
+        while (c < length && is(text[c], Space))
+            c++;
+        if (c >= length)
+            break;
+        cuts.push_back(c);
+    }
+    cuts.push_back(length);
+    size_t k = cuts.size() - 1;
+
+    std::vector<DocCommentMap> maps(k);
+    std::vector<LexerState> states;
+    states.reserve(k);
+    std::vector<Lexer> lexers;
+    lexers.reserve(k);
+    lexers.emplace_back(text, length, ls);
+    lexers[0].defer = true;
+    lexers[0].reserve(cuts[1]);
+    for (size_t i = 1; i < k; i++) {
+        states.push_back(
+            LexerState{
+                .positionToDocComment = maps[i],
+                .positions = ls.positions,
+                .origin = ls.origin,
+            });
+        lexers.emplace_back(text, length, states.back());
+        lexers[i].startChunk(cuts[i]);
+        lexers[i].reserve(cuts[i + 1] - cuts[i]);
+    }
+
+    std::vector<std::thread> threads;
+    for (size_t i = 1; i < k; i++)
+        threads.emplace_back([&, i] { lexers[i].runTo(cuts[i + 1]); });
+    lexers[0].runTo(cuts[1]);
+    for (auto & t : threads)
+        t.join();
+
+    auto & real = lexers[0];
+    for (size_t i = 1; i < k; i++)
+        if (!real.append(lexers[i]))
+            real.runTo(cuts[i + 1]);
+    real.unescapeDeferred();
+    return real.take();
 }
 
 } // namespace
@@ -1108,6 +1351,11 @@ const char * kindName(Kind k)
 
 Tokens lex(char * text, size_t length, LexerState & lexerState, bool replBindings)
 {
+    if (!replBindings && length >= 2 * uint64_t(minChunk())) {
+        unsigned chunks = std::min<uint64_t>(maxChunks(), length / minChunk());
+        if (chunks > 1)
+            return lexParallel(text, length, lexerState, chunks);
+    }
     Lexer lexer(text, length, lexerState);
     auto tokens = lexer.run(replBindings);
     return tokens;
