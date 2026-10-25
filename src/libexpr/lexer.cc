@@ -377,6 +377,10 @@ private:
         return false;
     }
 
+    /* Where `runTo` must get control back: the end of the chunk or of the
+       input */
+    uint32_t stopAt = 0;
+
     simd::Classifier classify;
     uint32_t maskBlock = UINT32_MAX;
     simd::Masks masks;
@@ -681,12 +685,16 @@ bool Lexer::lexDefault(uint32_t & p)
     unsigned char c = s[p];
     Match m;
 
+    /* The whitespace before a token, lexed in the same call as the token
+       unless it reaches where `runTo` has to look */
     if (is(c, Space)) {
         uint32_t q = scan<false>(p, &simd::Masks::space);
         adjust(q - p);
         docDistance--;
         p = q;
-        return true;
+        if (p >= stopAt)
+            return true;
+        c = s[p];
     }
 
     if (is(c, IdStart)) {
@@ -1109,6 +1117,7 @@ Tokens Lexer::run(bool replBindings)
 
 bool Lexer::runTo(uint32_t limit)
 {
+    stopAt = std::min(limit, n);
     while (!done) {
         if (pos >= limit && limit < n)
             return true;
