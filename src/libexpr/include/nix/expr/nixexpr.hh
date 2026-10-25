@@ -837,9 +837,10 @@ class Exprs
     /* Thread-safe fallback resource, which might be a bit slower. */
     std::pmr::synchronized_pool_resource fallbackResource;
     BumpMemoryResource buffer{BumpMemoryResource::defaultReserveSize, &fallbackResource};
+    ThreadCachedMemoryResource cached{&buffer};
 
 public:
-    std::pmr::polymorphic_allocator<char> alloc{&buffer};
+    std::pmr::polymorphic_allocator<char> alloc{&cached};
 
     template<class C>
     [[gnu::always_inline]]

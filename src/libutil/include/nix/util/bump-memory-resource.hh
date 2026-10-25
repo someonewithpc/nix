@@ -2,6 +2,8 @@
 ///@file
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory_resource>
 #include <new>
 
@@ -49,6 +51,64 @@ public:
     BumpMemoryResource & operator=(const BumpMemoryResource &) = delete;
 
     ~BumpMemoryResource() override;
+};
+
+/**
+ * Hands each thread its own chunks of an upstream resource to bump
+ * allocate from, so threads that allocate a lot do not all contend on the
+ * upstream resource's offset. Like the upstream resource it never frees
+ * anything before it is destroyed
+ */
+class ThreadCachedMemoryResource : public std::pmr::memory_resource
+{
+    static constexpr std::size_t chunkSize = 64 << 10;
+
+    static inline std::atomic<std::uint64_t> nextSerial{1};
+
+    struct Cache
+    {
+        std::uint64_t serial;
+        char * cur;
+        char * end;
+    };
+
+    /* Zero, like every thread_local */
+    static inline thread_local Cache cache;
+
+    std::pmr::memory_resource * upstream;
+    const std::uint64_t serial = nextSerial.fetch_add(1, std::memory_order_relaxed);
+
+protected:
+    void * do_allocate(std::size_t bytes, std::size_t alignment) override
+    {
+        if (bytes > chunkSize / 4 || alignment > alignof(std::max_align_t))
+            return upstream->allocate(bytes, alignment);
+        auto & c = cache;
+        if (c.serial == serial) {
+            auto p = reinterpret_cast<char *>((reinterpret_cast<std::uintptr_t>(c.cur) + alignment - 1) & ~(alignment - 1));
+            if (p + bytes <= c.end) {
+                c.cur = p + bytes;
+                return p;
+            }
+        }
+        /* Chunks start max-aligned, so the first allocation needs no padding */
+        auto chunk = static_cast<char *>(upstream->allocate(chunkSize, alignof(std::max_align_t)));
+        c = {serial, chunk + bytes, chunk + chunkSize};
+        return chunk;
+    }
+
+    void do_deallocate(void * p, std::size_t bytes, std::size_t alignment) override {}
+
+    bool do_is_equal(const std::pmr::memory_resource & other) const noexcept override
+    {
+        return this == &other;
+    }
+
+public:
+    explicit ThreadCachedMemoryResource(std::pmr::memory_resource * upstream)
+        : upstream(upstream)
+    {
+    }
 };
 
 } // namespace nix
