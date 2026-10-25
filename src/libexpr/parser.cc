@@ -610,15 +610,68 @@ class Parser
         bool entry = false;
     };
 
-    std::vector<Frame> frames;
-    Stack<std::vector<AttrName>> paths;
-    Stack<std::vector<std::pair<PosIdx, Expr *>>> parts;
-    Stack<std::vector<std::pair<PosIdx, std::variant<Expr *, StringToken>>>> indParts;
-    Stack<std::pmr::vector<Expr *>> lists;
-    Stack<std::vector<std::pair<uint32_t, Expr *>>> pipes;
-    Stack<FormalsBuilder> formals;
-    Stack<Inherit> inherits;
-    Stack<Binds> bindsStack;
+    /* The stacks of the state machine, kept from one parse to the next on
+       the same thread so that their buffers are only allocated once */
+    struct Scratch
+    {
+        std::vector<Frame> frames;
+        Stack<std::vector<AttrName>> paths;
+        Stack<std::vector<std::pair<PosIdx, Expr *>>> parts;
+        Stack<std::vector<std::pair<PosIdx, std::variant<Expr *, StringToken>>>> indParts;
+        Stack<std::pmr::vector<Expr *>> lists;
+        Stack<std::vector<std::pair<uint32_t, Expr *>>> pipes;
+        Stack<FormalsBuilder> formals;
+        Stack<Inherit> inherits;
+        Stack<Binds> bindsStack;
+        bool busy = false;
+
+        /* Drop what a big file grew, which the next files would not use */
+        void trim()
+        {
+            constexpr size_t keep = 4096;
+            if (frames.capacity() > keep)
+                frames = {};
+            auto trimStack = [&](auto & stack, auto && size) {
+                if (stack.items.size() > keep)
+                    stack.items.clear();
+                for (auto & v : stack.items)
+                    if (size(v) > keep)
+                        v = {};
+            };
+            auto cap = [](auto & v) { return v.capacity(); };
+            trimStack(paths, cap);
+            trimStack(parts, cap);
+            trimStack(indParts, cap);
+            trimStack(lists, cap);
+            trimStack(pipes, cap);
+            trimStack(formals, [](auto & f) { return f.formals.capacity(); });
+            trimStack(inherits, [](auto & i) { return i.names.capacity(); });
+            if (bindsStack.items.size() > keep)
+                bindsStack.items.clear();
+        }
+    };
+
+    static Scratch & threadScratch()
+    {
+        thread_local Scratch s;
+        return s;
+    }
+
+    /* A parser that runs while another one on the same thread is in the
+       middle of a parse, as a piece of a big set can, gets stacks of its
+       own */
+    std::unique_ptr<Scratch> ownScratch;
+    Scratch & sc = threadScratch().busy ? *(ownScratch = std::make_unique<Scratch>()) : threadScratch();
+
+    std::vector<Frame> & frames = sc.frames;
+    Stack<std::vector<AttrName>> & paths = sc.paths;
+    Stack<std::vector<std::pair<PosIdx, Expr *>>> & parts = sc.parts;
+    Stack<std::vector<std::pair<PosIdx, std::variant<Expr *, StringToken>>>> & indParts = sc.indParts;
+    Stack<std::pmr::vector<Expr *>> & lists = sc.lists;
+    Stack<std::vector<std::pair<uint32_t, Expr *>>> & pipes = sc.pipes;
+    Stack<FormalsBuilder> & formals = sc.formals;
+    Stack<Inherit> & inherits = sc.inherits;
+    Stack<Binds> & bindsStack = sc.bindsStack;
 
     enum Entry { EntryExpr, EntryBinds, EntryBindsTo };
 
@@ -639,10 +692,23 @@ public:
         , tk(tk)
         , t(tk.tokens.data())
     {
+        sc.busy = true;
         symbols.start(st.symbols);
         if (st.imports)
             sImport = symbols.get(st.symbols, "import");
     }
+
+    ~Parser()
+    {
+        /* A parse that threw leaves its frames */
+        frames.clear();
+        paths.n = parts.n = indParts.n = lists.n = pipes.n = formals.n = inherits.n = bindsStack.n = 0;
+        sc.trim();
+        sc.busy = false;
+    }
+
+    Parser(const Parser &) = delete;
+    Parser & operator=(const Parser &) = delete;
 
     Expr * parseStart(bool repl);
 };
@@ -1614,7 +1680,11 @@ bindsLoop: {
         goto attrPath;
     case INHERIT:
         next();
-        inherits.push() = Inherit{};
+        {
+            auto & inh = inherits.push();
+            inh.from = nullptr;
+            inh.names.clear();
+        }
         if (kind() == LPAREN) {
             next();
             push(KInheritFrom);
