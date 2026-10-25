@@ -30,7 +30,7 @@ struct Masks
     uint64_t digit;
     /** `["\\$]`, where a string body stops */
     uint64_t strStop;
-    /** `[$']`, where an indented string body stops */
+    /** `[$'\0]`, where an indented string body stops or has a NUL */
     uint64_t indStop;
     /** `[\r\n]` */
     uint64_t newline;

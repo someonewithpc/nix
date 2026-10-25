@@ -1024,9 +1024,13 @@ bool Lexer::lexString(uint32_t & p)
         return true;
     }
 
-    /* `([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})*` */
+    /* `([^\$\"\\]|\$[^\{\"\\]|\\{ANY}|\$\\{ANY})*`, from one `"`, `\\` or
+       `$` to the next */
     uint32_t q = p;
-    while (q < n) {
+    while (true) {
+        q = scan<true>(q, &simd::Masks::strStop);
+        if (q >= n)
+            break;
         char c = s[q];
         if (c == '"')
             break;
@@ -1034,20 +1038,19 @@ bool Lexer::lexString(uint32_t & p)
             if (q + 1 >= n)
                 break;
             q += 2;
-        } else if (c == '$') {
-            if (q + 1 >= n)
+            continue;
+        }
+        if (q + 1 >= n)
+            break;
+        char d = s[q + 1];
+        if (d == '{' || d == '"')
+            break;
+        if (d == '\\') {
+            if (q + 2 >= n)
                 break;
-            char d = s[q + 1];
-            if (d == '{' || d == '"')
-                break;
-            if (d == '\\') {
-                if (q + 2 >= n)
-                    break;
-                q += 3;
-            } else
-                q += 2;
+            q += 3;
         } else
-            q++;
+            q += 2;
     }
 
     uint32_t len = q - p;
@@ -1109,23 +1112,26 @@ bool Lexer::lexIndString(uint32_t & p)
         return true;
     }
 
-    /* `([^\$\']|\$[^\{\']|\'[^\'\$])+` */
+    /* `([^\$\']|\$[^\{\']|\'[^\'\$])+`, from one `$`, `'` or NUL to the next */
     uint32_t q = p;
     bool nullByte = false;
-    while (q < n) {
+    while (true) {
+        q = scan<true>(q, &simd::Masks::indStop);
+        if (q >= n)
+            break;
         char e = s[q];
-        if (e == '$' || e == '\'') {
-            if (q + 1 >= n)
-                break;
-            char f = s[q + 1];
-            if (e == '$' ? f == '{' || f == '\'' : f == '\'' || f == '$')
-                break;
-            nullByte |= f == '\0';
-            q += 2;
-        } else {
-            nullByte |= e == '\0';
+        if (e == '\0') {
+            nullByte = true;
             q++;
+            continue;
         }
+        if (q + 1 >= n)
+            break;
+        char f = s[q + 1];
+        if (e == '$' ? f == '{' || f == '\'' : f == '\'' || f == '$')
+            break;
+        nullByte |= f == '\0';
+        q += 2;
     }
     if (q > p) {
         adjust(q - p);

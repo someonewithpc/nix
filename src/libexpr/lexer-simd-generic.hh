@@ -27,7 +27,7 @@ inline void classifyWith(const unsigned char * block, Masks & out)
         V ident = V::or_(both, V::eq(x, '\''));
         V path = V::or_(both, V::or_(V::eq(x, '.'), V::eq(x, '+')));
         V strStop = V::or_(dollar, V::or_(V::eq(x, '"'), V::eq(x, '\\')));
-        V indStop = V::or_(dollar, V::eq(x, '\''));
+        V indStop = V::or_(V::or_(dollar, V::eq(x, '\'')), V::eq(x, 0));
         auto shift = [&](uint64_t m) { return m << i; };
         out.space |= shift(V::mask(space));
         out.ident |= shift(V::mask(ident));
