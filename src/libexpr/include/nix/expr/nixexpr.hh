@@ -26,6 +26,7 @@ class PosTable;
 struct Env;
 struct ExprWith;
 struct StaticEnv;
+class StaticEnvScope;
 struct Value;
 
 /**
@@ -449,7 +450,11 @@ struct ExprAttrs : Expr
 
     COMMON_METHODS
 
-    std::shared_ptr<const StaticEnv> bindInheritSources(EvalState & es, const std::shared_ptr<const StaticEnv> & env);
+    /**
+     * @param scope Holds the environment until the caller is done with it
+     */
+    std::shared_ptr<const StaticEnv>
+    bindInheritSources(EvalState & es, const std::shared_ptr<const StaticEnv> & env, StaticEnvScope & scope);
     Env * buildInheritFromEnv(EvalState & state, Env & up);
     void showBindings(const SymbolTable & symbols, std::ostream & str) const;
     void moveDataToAllocator(std::pmr::polymorphic_allocator<char> & alloc);

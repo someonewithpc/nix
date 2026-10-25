@@ -5,6 +5,7 @@
 #include "nix/expr/print.hh"
 
 #include <cstdlib>
+#include <deque>
 #include <sstream>
 
 #include "nix/util/strings-inline.hh"
@@ -378,8 +379,79 @@ void ExprOpHasAttr::bindVars(EvalState & es, const std::shared_ptr<const StaticE
             i.expr->bindVars(es, env);
 }
 
+/* The environment of a scope that bindVars opens. Only the debugger keeps
+   one past the bindVars call that made it. Otherwise it comes from a
+   stack of environments that the thread keeps, which scopes use in order
+   since they nest; the pointer to it owns nothing, so it costs no
+   allocation once the stack is deep enough, and copying the pointer costs
+   no atomic operations. A frame only holds this guard, so bindVars nests
+   as deep as it did */
+class StaticEnvScope
+{
+    struct Stack
+    {
+        /* Deque, so that the environments never move */
+        std::deque<StaticEnv> envs;
+        size_t used = 0;
+    };
+
+    static Stack & stack()
+    {
+        thread_local Stack s;
+        return s;
+    }
+
+    StaticEnv * env = nullptr;
+
+public:
+    StaticEnvScope() = default;
+    StaticEnvScope(const StaticEnvScope &) = delete;
+    StaticEnvScope & operator=(const StaticEnvScope &) = delete;
+
+    [[gnu::noinline]] std::shared_ptr<const StaticEnv>
+    makeConst(EvalState & es, ExprWith * isWith, const std::shared_ptr<const StaticEnv> & up)
+    {
+        return make(es, isWith, up);
+    }
+
+    /* Out of line, so that its locals stay out of the frames of the
+       recursion */
+    [[gnu::noinline]] std::shared_ptr<StaticEnv>
+    make(EvalState & es, ExprWith * isWith, const std::shared_ptr<const StaticEnv> & up, size_t expectedSize = 0)
+    {
+        if (es.debugRepl)
+            return std::make_shared<StaticEnv>(isWith, up, expectedSize);
+        assert(!env);
+        auto & st = stack();
+        if (st.used == st.envs.size())
+            st.envs.emplace_back(nullptr, nullptr);
+        env = &st.envs[st.used++];
+        env->isWith = isWith;
+        env->up = up;
+        env->vars.clear();
+        env->vars.reserve(expectedSize);
+        return std::shared_ptr<StaticEnv>(std::shared_ptr<void>(), env);
+    }
+
+    ~StaticEnvScope()
+    {
+        if (env)
+            release();
+    }
+
+private:
+
+    [[gnu::noinline]] void release()
+    {
+        env->up = nullptr;
+        if (env->vars.capacity() > 4096)
+            env->vars = {};
+        stack().used--;
+    }
+};
+
 std::shared_ptr<const StaticEnv>
-ExprAttrs::bindInheritSources(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
+ExprAttrs::bindInheritSources(EvalState & es, const std::shared_ptr<const StaticEnv> & env, StaticEnvScope & scope)
 {
     if (!inheritFromExprs)
         return nullptr;
@@ -392,7 +464,7 @@ ExprAttrs::bindInheritSources(EvalState & es, const std::shared_ptr<const Static
     // and displacement, and nothing else is allowed to access it. ideally we'd
     // not even *have* an expr that grabs anything from this env since it's fully
     // invisible, but the evaluator does not allow for this yet.
-    auto inner = std::make_shared<StaticEnv>(nullptr, env, 0);
+    auto inner = scope.make(es, nullptr, env);
     for (auto from : *inheritFromExprs)
         from->bindVars(es, env);
 
@@ -413,6 +485,19 @@ void ExprAttrs::moveDataToAllocator(std::pmr::polymorphic_allocator<char> & allo
         inheritFromExprs = std::make_unique<std::pmr::vector<Expr *>>(std::move(*inheritFromExprs), alloc);
 }
 
+/* The environment of a `rec` set or a `let`. Out of line, so that the
+   frames of the recursion stay as small as they were */
+[[gnu::noinline]] static std::shared_ptr<const StaticEnv> makeAttrsEnv(
+    EvalState & es, const std::shared_ptr<const StaticEnv> & env, StaticEnvScope & scope, ExprAttrs::AttrDefs & attrs)
+{
+    auto newEnv = scope.make(es, nullptr, env, attrs.size());
+
+    Displacement displ = 0;
+    for (auto & i : attrs)
+        newEnv->vars.emplace_back(i.first, i.second.displ = displ++);
+    return newEnv;
+}
+
 void ExprAttrs::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
 {
     moveDataToAllocator(es.mem.exprs.alloc);
@@ -421,18 +506,12 @@ void ExprAttrs::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> 
         es.exprEnvs.insert(std::make_pair(this, env));
 
     if (recursive) {
-        auto newEnv = [&]() -> std::shared_ptr<const StaticEnv> {
-            auto newEnv = std::make_shared<StaticEnv>(nullptr, env, attrs->size());
-
-            Displacement displ = 0;
-            for (auto & i : *attrs)
-                newEnv->vars.emplace_back(i.first, i.second.displ = displ++);
-            return newEnv;
-        }();
+        StaticEnvScope scope, inheritScope;
+        auto newEnv = makeAttrsEnv(es, env, scope, *attrs);
 
         // No need to sort newEnv since attrs is in sorted order.
 
-        auto inheritFromEnv = bindInheritSources(es, newEnv);
+        auto inheritFromEnv = bindInheritSources(es, newEnv, inheritScope);
         for (auto & i : *attrs)
             i.second.e->bindVars(es, i.second.chooseByKind(newEnv, env, inheritFromEnv));
 
@@ -441,7 +520,8 @@ void ExprAttrs::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> 
             i.valueExpr->bindVars(es, newEnv);
         }
     } else {
-        auto inheritFromEnv = bindInheritSources(es, env);
+        StaticEnvScope inheritScope;
+        auto inheritFromEnv = bindInheritSources(es, env, inheritScope);
 
         for (auto & i : *attrs)
             i.second.e->bindVars(es, i.second.chooseByKind(env, env, inheritFromEnv));
@@ -462,29 +542,44 @@ void ExprList::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> &
         i->bindVars(es, env);
 }
 
-void ExprLambda::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
+/* Out of line, so that the frames of the recursion stay as small as they
+   were */
+[[gnu::noinline]] static std::shared_ptr<const StaticEnv> makeLambdaEnv(
+    EvalState & es,
+    const std::shared_ptr<const StaticEnv> & env,
+    StaticEnvScope & scope,
+    Symbol arg,
+    const std::optional<Formals> & formals)
 {
-    if (es.debugRepl)
-        es.exprEnvs.insert(std::make_pair(this, env));
-
-    auto newEnv =
-        std::make_shared<StaticEnv>(nullptr, env, (getFormals() ? getFormals()->formals.size() : 0) + (!arg ? 0 : 1));
+    auto newEnv = scope.make(es, nullptr, env, (formals ? formals->formals.size() : 0) + (!arg ? 0 : 1));
 
     Displacement displ = 0;
 
     if (arg)
         newEnv->vars.emplace_back(arg, displ++);
 
-    if (auto formals = getFormals()) {
+    if (formals) {
         for (auto & i : formals->formals)
             newEnv->vars.emplace_back(i.name, displ++);
 
         newEnv->sort();
+    }
+    return newEnv;
+}
 
+void ExprLambda::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
+{
+    if (es.debugRepl)
+        es.exprEnvs.insert(std::make_pair(this, env));
+
+    StaticEnvScope scope;
+    auto formals = getFormals();
+    auto newEnv = makeLambdaEnv(es, env, scope, arg, formals);
+
+    if (formals)
         for (auto & i : formals->formals)
             if (i.def)
                 i.def->bindVars(es, newEnv);
-    }
 
     body->bindVars(es, newEnv);
 }
@@ -511,18 +606,12 @@ void ExprCall::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> &
 void ExprLet::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
 {
     attrs->moveDataToAllocator(es.mem.exprs.alloc);
-    auto newEnv = [&]() -> std::shared_ptr<const StaticEnv> {
-        auto newEnv = std::make_shared<StaticEnv>(nullptr, env, attrs->attrs->size());
-
-        Displacement displ = 0;
-        for (auto & i : *attrs->attrs)
-            newEnv->vars.emplace_back(i.first, i.second.displ = displ++);
-        return newEnv;
-    }();
+    StaticEnvScope scope, inheritScope;
+    auto newEnv = makeAttrsEnv(es, env, scope, *attrs->attrs);
 
     // No need to sort newEnv since attrs->attrs is in sorted order.
 
-    auto inheritFromEnv = attrs->bindInheritSources(es, newEnv);
+    auto inheritFromEnv = attrs->bindInheritSources(es, newEnv, inheritScope);
     for (auto & i : *attrs->attrs)
         i.second.e->bindVars(es, i.second.chooseByKind(newEnv, env, inheritFromEnv));
 
@@ -555,8 +644,8 @@ void ExprWith::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> &
         }
 
     attrs->bindVars(es, env);
-    auto newEnv = std::make_shared<StaticEnv>(this, env);
-    body->bindVars(es, newEnv);
+    StaticEnvScope scope;
+    body->bindVars(es, scope.makeConst(es, this, env));
 }
 
 void ExprIf::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
