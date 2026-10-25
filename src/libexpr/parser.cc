@@ -226,10 +226,6 @@ unsigned maxPieces()
     return v;
 }
 
-/* Nesting the parser handles before giving up instead of running out of
-   stack */
-constexpr unsigned maxDepth = 20000;
-
 class Parser
 {
     ParserState & st;
@@ -237,7 +233,6 @@ class Parser
     char * const text;
     const Tokens & tk;
     const Token * t;
-    unsigned depth = 0;
 
     /* The `{` and `}` of the attribute sets big enough to parse in
        pieces, by `{` */
@@ -410,38 +405,16 @@ class Parser
         return st.exprs.add<ExprCall>(pos, fn, {arg});
     }
 
-    struct DepthGuard
-    {
-        Parser & p;
-
-        DepthGuard(Parser & p, const Token & tok)
-            : p(p)
-        {
-            if (++p.depth > maxDepth)
-                throw ParseError(
-                    {.msg = HintFmt("expression is nested too deeply"), .pos = p.st.positions[p.at(tok.begin)]});
-        }
-
-        ~DepthGuard()
-        {
-            p.depth--;
-        }
-    };
-
-    E parseExpr();
-    E parseExprFunction();
-    E parseExprIf();
-    E parseExprOp(int minPrec);
-    E parseUnary();
-    E parseExprApp();
-    E parseExprSelect();
-    E parseSimple();
     bool isFormals();
-    FormalsBuilder parseFormalSet();
-    std::vector<AttrName> parseAttrPath();
-    ToBeStringyExpr parseStringParts();
-    std::vector<std::pair<PosIdx, Expr *>> parseInterpolated(bool path);
     Expr * parsePathStart(const Token & tok);
+
+    void addStringy(std::vector<AttrName> & path, ToBeStringyExpr && x)
+    {
+        x.visit(
+            overloaded{
+                [&](std::string_view str) { path.emplace_back(st.symbols.create(str)); },
+                [&](Expr * expr) { path.emplace_back(expr); }});
+    }
 
     enum BindsContext {
         /* `{ ... }`, which needs one binding at least */
@@ -471,13 +444,124 @@ class Parser
         std::optional<Inherit> inherit;
     };
 
-    ExprAttrs * parseBinds(BindsContext ctx);
+    /* Where the machine goes on once the rule it went into is done */
+    enum Cont : uint8_t {
+        KExit,
+        KLambda,
+        KLambdaAtFormals,
+        KLambdaAtBody,
+        KSetLambdaFormals,
+        KSetLambdaBody,
+        KSetLambdaAtBody,
+        KAssertCond,
+        KAssertBody,
+        KWithAttrs,
+        KWithBody,
+        KLetBinds,
+        KLetBody,
+        KIfCond,
+        KIfThen,
+        KIfElse,
+        KIfOp,
+        KPipeFrom,
+        KPipeInto,
+        KNot,
+        KNegate,
+        KOpLhs,
+        KOpHasAttr,
+        KOpRhs,
+        KAppFirst,
+        KAppArg,
+        KSelSimple,
+        KSelPath,
+        KSelDefault,
+        KPathQuote,
+        KPathDollar,
+        KStrParts,
+        KInterpDollar,
+        KSimpleQuote,
+        KIndDollar,
+        KPathInterp,
+        KParen,
+        KLetSet,
+        KRecSet,
+        KSet,
+        KList,
+        KBindPath,
+        KBindValue,
+        KInheritFrom,
+        KInheritQuote,
+        KInheritDollar,
+        KFormalDefault,
+    };
+
+    struct Frame
+    {
+        Cont k;
+        Prec lastNonAssoc = PNone;
+        bool path = false;
+        int minPrec = 0;
+        const Token * tok = nullptr;
+        const Token * tok2 = nullptr;
+        E a{}, b{};
+    };
+
+    /* A stack whose popped elements keep their buffers for the next push */
+    template<typename T>
+    struct Stack
+    {
+        std::vector<T> items;
+        size_t n = 0;
+
+        T & push()
+        {
+            if (n == items.size())
+                items.emplace_back();
+            return items[n++];
+        }
+
+        T & top()
+        {
+            return items[n - 1];
+        }
+
+        void pop()
+        {
+            n--;
+        }
+    };
+
+    struct Binds
+    {
+        ExprAttrs * attrs = nullptr;
+        bool any = false;
+        const Token * limit = nullptr;
+        std::vector<Binding> * record = nullptr;
+        BindsContext ctx = Braces;
+        /* Whether the bindings went on past `limit` */
+        bool more = false;
+        /* Started by `runBindsTo`, which gets them back */
+        bool entry = false;
+    };
+
+    std::vector<Frame> frames;
+    Stack<std::vector<AttrName>> paths;
+    Stack<std::vector<std::pair<PosIdx, Expr *>>> parts;
+    Stack<std::vector<std::pair<PosIdx, std::variant<Expr *, StringToken>>>> indParts;
+    Stack<std::pmr::vector<Expr *>> lists;
+    Stack<std::vector<std::pair<uint32_t, Expr *>>> pipes;
+    Stack<FormalsBuilder> formals;
+    Stack<Inherit> inherits;
+    Stack<Binds> bindsStack;
+
+    enum Entry { EntryExpr, EntryBinds, EntryBindsTo };
+
+    E run(Entry entry, BindsContext bindsCtx = Braces);
     /* Parse bindings into `attrs`, or into `record` when it is set, until
        `t` reaches `limit`; false at the first token that starts no
        binding */
-    bool parseBindsTo(ExprAttrs *& attrs, bool & any, const Token * limit, std::vector<Binding> * record);
+    bool runBindsTo(ExprAttrs *& attrs, bool & any, const Token * limit, std::vector<Binding> * record);
     bool parseBindsInPieces(ExprAttrs *& attrs, bool & any);
-    Inherit parseInherit();
     void addInherit(ExprAttrs * attrs, Inherit && inherit);
     void findBigSets();
 
@@ -501,21 +585,16 @@ Expr * Parser::parseStart(bool repl)
 {
     if (tk.tokens.size() >= 2 * minPiece() && maxPieces() > 1)
         findBigSets();
+    frames.reserve(64);
     if (repl && kind() == REPL_BINDINGS) {
         next();
-        auto attrs = parseBinds(Repl);
+        auto attrs = run(EntryBinds, Repl);
         expect(EOF_, {EOF_});
-        return attrs;
+        return attrs.e;
     }
-    auto e = parseExpr();
+    auto e = run(EntryExpr);
     expect(EOF_, {EOF_});
     return e.e;
-}
-
-E Parser::parseExpr()
-{
-    DepthGuard guard(*this, *t);
-    return parseExprFunction();
 }
 
 bool Parser::isFormals()
@@ -535,399 +614,6 @@ bool Parser::isFormals()
     }
     default:
         return false;
-    }
-}
-
-FormalsBuilder Parser::parseFormalSet()
-{
-    FormalsBuilder fs;
-    fs.ellipsis = false;
-    expect(LBRACE, {LBRACE});
-    if (kind() == RBRACE) {
-        next();
-        return fs;
-    }
-    if (kind() == ELLIPSIS) {
-        next();
-        expect(RBRACE, {RBRACE});
-        fs.ellipsis = true;
-        return fs;
-    }
-    while (true) {
-        auto & id = expect(ID, {ID, ELLIPSIS, RBRACE});
-        Expr * def = nullptr;
-        if (kind() == QUESTION) {
-            next();
-            def = parseExpr().e;
-        }
-        fs.formals.emplace_back(Formal{at(id.begin), sym(id), def});
-        auto k = kind();
-        if (k == RBRACE) {
-            next();
-            return fs;
-        }
-        if (k != COMMA)
-            syntaxError(peek(), {RBRACE, COMMA});
-        next();
-        k = kind();
-        if (k == RBRACE) {
-            next();
-            return fs;
-        }
-        if (k == ELLIPSIS) {
-            next();
-            expect(RBRACE, {RBRACE});
-            fs.ellipsis = true;
-            return fs;
-        }
-    }
-}
-
-E Parser::parseExprFunction()
-{
-    auto & tok = peek();
-    switch (+tok.kind) {
-    case ID: {
-        auto k = kindAt(1);
-        if (k == COLON) {
-            next();
-            next();
-            auto body = parseExprFunction();
-            auto me = st.exprs.add<ExprLambda>(at(tok.begin), sym(tok), body.e);
-            setDocPosition(me, tok.begin);
-            return {me, tok.begin};
-        }
-        if (k == AT) {
-            next();
-            next();
-            auto fs = parseFormalSet();
-            expect(COLON, {COLON});
-            auto body = parseExprFunction();
-            auto arg = sym(tok);
-            st.validateFormals(fs, at(tok.begin), arg);
-            auto me = st.exprs.add<ExprLambda>(st.positions, st.exprs.alloc, at(tok.begin), arg, fs, body.e);
-            setDocPosition(me, tok.begin);
-            return {me, tok.begin};
-        }
-        break;
-    }
-    case LBRACE:
-        if (isFormals()) {
-            auto fs = parseFormalSet();
-            auto & k = peek();
-            if (k.kind == COLON) {
-                next();
-                auto body = parseExprFunction();
-                st.validateFormals(fs);
-                auto me = st.exprs.add<ExprLambda>(st.positions, st.exprs.alloc, at(tok.begin), fs, body.e);
-                setDocPosition(me, tok.begin);
-                return {me, tok.begin};
-            }
-            if (k.kind == AT) {
-                next();
-                auto & id = expect(ID, {ID});
-                expect(COLON, {COLON});
-                auto body = parseExprFunction();
-                auto arg = sym(id);
-                st.validateFormals(fs, at(tok.begin), arg);
-                auto me = st.exprs.add<ExprLambda>(st.positions, st.exprs.alloc, at(tok.begin), arg, fs, body.e);
-                setDocPosition(me, tok.begin);
-                return {me, tok.begin};
-            }
-            syntaxError(k, {COLON, AT});
-        }
-        break;
-    case ASSERT: {
-        next();
-        auto cond = parseExpr();
-        expect(SEMICOLON, {SEMICOLON});
-        auto body = parseExprFunction();
-        return {st.exprs.add<ExprAssert>(at(tok.begin), cond.e, body.e), tok.begin};
-    }
-    case WITH: {
-        next();
-        auto attrs = parseExpr();
-        expect(SEMICOLON, {SEMICOLON});
-        auto body = parseExprFunction();
-        return {st.exprs.add<ExprWith>(at(tok.begin), attrs.e, body.e), tok.begin};
-    }
-    case LET: {
-        if (kindAt(1) == LBRACE)
-            break;
-        next();
-        auto binds = parseBinds(LetIn);
-        expect(IN_KW, {IN_KW, INHERIT});
-        auto body = parseExprFunction();
-        if (!binds->dynamicAttrs->empty())
-            throw ParseError({.msg = HintFmt("dynamic attributes not allowed in let"), .pos = st.positions[at(tok.begin)]});
-        return {st.exprs.add<ExprLet>(binds, body.e), tok.begin};
-    }
-    default:
-        break;
-    }
-    return parseExprIf();
-}
-
-E Parser::parseExprIf()
-{
-    auto & tok = peek();
-    if (tok.kind == IF) {
-        next();
-        auto cond = parseExpr();
-        expect(THEN, {THEN});
-        auto then = parseExpr();
-        expect(ELSE, {ELSE});
-        auto else_ = parseExpr();
-        return {st.exprs.add<ExprIf>(at(tok.begin), cond.e, then.e, else_.e), tok.begin};
-    }
-
-    auto lhs = parseExprOp(PImpl);
-
-    if (kind() == PIPE_FROM) {
-        /* Right associative */
-        std::vector<std::pair<uint32_t, Expr *>> chain;
-        chain.emplace_back(0, lhs.e);
-        while (kind() == PIPE_FROM) {
-            auto & op = next();
-            chain.emplace_back(op.begin, parseExprOp(PImpl).e);
-        }
-        Expr * acc = chain.back().second;
-        for (size_t i = chain.size() - 1; i > 0; i--)
-            acc = makeCall(at(chain[i].first), chain[i - 1].second, acc);
-        return {acc, lhs.begin};
-    }
-
-    if (kind() == PIPE_INTO) {
-        Expr * acc = lhs.e;
-        while (kind() == PIPE_INTO) {
-            auto & op = next();
-            auto rhs = parseExprOp(PImpl);
-            acc = makeCall(at(op.begin), rhs.e, acc);
-        }
-        return {acc, lhs.begin};
-    }
-
-    return lhs;
-}
-
-E Parser::parseUnary()
-{
-    auto & tok = peek();
-    if (tok.kind == BANG) {
-        next();
-        DepthGuard guard(*this, tok);
-        auto operand = parseExprOp(PNot + 1);
-        return {st.exprs.add<ExprOpNot>(operand.e), tok.begin};
-    }
-    if (tok.kind == MINUS) {
-        next();
-        DepthGuard guard(*this, tok);
-        auto operand = parseExprOp(PNegate + 1);
-        return {
-            st.exprs.add<ExprCall>(
-                at(tok.begin), st.exprs.add<ExprVar>(st.s.sub), {st.exprs.add<ExprInt>(0), operand.e}),
-            tok.begin};
-    }
-    return parseExprApp();
-}
-
-E Parser::parseExprOp(int minPrec)
-{
-    auto lhs = parseUnary();
-    Prec lastNonAssoc = PNone;
-
-    while (true) {
-        auto & op = peek();
-        Prec p = precs[op.kind];
-        if (p == PNone || p < minPrec)
-            break;
-        if (p == lastNonAssoc)
-            syntaxError(op);
-        next();
-
-        if (op.kind == QUESTION) {
-            auto path = parseAttrPath();
-            lhs.e = st.exprs.add<ExprOpHasAttr>(st.exprs.alloc, lhs.e, path);
-            lastNonAssoc = PNone;
-            continue;
-        }
-
-        DepthGuard guard(*this, op);
-        auto rhs = parseExprOp(rightAssoc(op.kind) ? p : p + 1);
-        auto pos = at(op.begin);
-        auto & ex = st.exprs;
-        Expr * e;
-        switch (+op.kind) {
-        case EQ:
-            e = ex.add<ExprOpEq>(pos, lhs.e, rhs.e);
-            break;
-        case NEQ:
-            e = ex.add<ExprOpNEq>(pos, lhs.e, rhs.e);
-            break;
-        case LT:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {lhs.e, rhs.e});
-            break;
-        case LEQ:
-            e = ex.add<ExprOpNot>(ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {rhs.e, lhs.e}));
-            break;
-        case GT:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {rhs.e, lhs.e});
-            break;
-        case GEQ:
-            e = ex.add<ExprOpNot>(ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {lhs.e, rhs.e}));
-            break;
-        case AND:
-            e = ex.add<ExprOpAnd>(pos, lhs.e, rhs.e);
-            break;
-        case OR:
-            e = ex.add<ExprOpOr>(pos, lhs.e, rhs.e);
-            break;
-        case IMPL:
-            e = ex.add<ExprOpImpl>(pos, lhs.e, rhs.e);
-            break;
-        case UPDATE:
-            e = ex.add<ExprOpUpdate>(pos, lhs.e, rhs.e);
-            break;
-        case PLUS:
-            e = ex.add<ExprConcatStrings>(
-                ex.alloc, pos, false, {{at(lhs.begin), lhs.e}, {at(rhs.begin), rhs.e}});
-            break;
-        case MINUS:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.sub), {lhs.e, rhs.e});
-            break;
-        case STAR:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.mul), {lhs.e, rhs.e});
-            break;
-        case SLASH:
-            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.div), {lhs.e, rhs.e});
-            break;
-        case CONCAT:
-            e = ex.add<ExprOpConcatLists>(pos, lhs.e, rhs.e);
-            break;
-        default:
-            unreachable();
-        }
-        lhs.e = e;
-        lastNonAssoc = nonAssoc(p) ? p : PNone;
-    }
-
-    return lhs;
-}
-
-E Parser::parseExprApp()
-{
-    auto first = parseExprSelect();
-    first.e->resetCursedOr();
-    Expr * acc = first.e;
-    while (simpleStarts[kind()]) {
-        auto arg = parseExprSelect();
-        if (st.imports && acc == first.e)
-            if (auto var = dynamic_cast<ExprVar *>(acc); var && var->name == sImport)
-                if (auto path = dynamic_cast<ExprPath *>(arg.e))
-                    st.imports->push_back(path->v.path());
-        acc = makeCall(at(first.begin), acc, arg.e);
-        warnIfCursedOr(arg.e);
-    }
-    return {acc, first.begin};
-}
-
-E Parser::parseExprSelect()
-{
-    auto s = parseSimple();
-    auto & tok = peek();
-    if (tok.kind == DOT) {
-        next();
-        auto path = parseAttrPath();
-        if (kind() == OR_KW) {
-            next();
-            auto def = parseExprSelect();
-            auto e = st.exprs.add<ExprSelect>(st.exprs.alloc, at(s.begin), s.e, path, def.e);
-            warnIfCursedOr(def.e);
-            return {e, s.begin};
-        }
-        return {st.exprs.add<ExprSelect>(st.exprs.alloc, at(s.begin), s.e, path, nullptr), s.begin};
-    }
-    if (tok.kind == OR_KW) {
-        next();
-        return {
-            st.exprs.add<ExprCall>(
-                at(s.begin), s.e, {st.exprs.add<ExprVar>(at(s.begin), st.s.or_)}, st.positions.add(st.origin, tok.end)),
-            s.begin};
-    }
-    return s;
-}
-
-std::vector<AttrName> Parser::parseAttrPath()
-{
-    std::vector<AttrName> path;
-    auto addStringy = [&](ToBeStringyExpr && x) {
-        x.visit(
-            overloaded{
-                [&](std::string_view str) { path.emplace_back(st.symbols.create(str)); },
-                [&](Expr * expr) { path.emplace_back(expr); }});
-    };
-    while (true) {
-        auto & tok = peek();
-        switch (+tok.kind) {
-        case ID:
-            next();
-            path.emplace_back(sym(tok));
-            break;
-        case OR_KW:
-            next();
-            path.emplace_back(st.symbols.create("or"));
-            break;
-        case QUOTE: {
-            next();
-            auto parts = parseStringParts();
-            expect(QUOTE, {QUOTE});
-            addStringy(std::move(parts));
-            break;
-        }
-        case DOLLAR_CURLY: {
-            next();
-            auto e = parseExpr();
-            expect(RBRACE, {RBRACE});
-            addStringy(ToBeStringyExpr(e.e));
-            break;
-        }
-        default:
-            syntaxError(tok, {ID, OR_KW, DOLLAR_CURLY, QUOTE});
-        }
-        if (kind() != DOT)
-            return path;
-        next();
-    }
-}
-
-ToBeStringyExpr Parser::parseStringParts()
-{
-    auto & tok = peek();
-    if (tok.kind == STR && kindAt(1) != DOLLAR_CURLY) {
-        next();
-        return ToBeStringyExpr(strValue(tok));
-    }
-    if (tok.kind != STR && tok.kind != DOLLAR_CURLY)
-        return ToBeStringyExpr(std::string_view());
-    auto parts = parseInterpolated(false);
-    return ToBeStringyExpr(st.exprs.add<ExprConcatStrings>(st.exprs.alloc, at(tok.begin), true, parts));
-}
-
-std::vector<std::pair<PosIdx, Expr *>> Parser::parseInterpolated(bool path)
-{
-    std::vector<std::pair<PosIdx, Expr *>> parts;
-    while (true) {
-        auto & tok = peek();
-        if (tok.kind == STR) {
-            next();
-            parts.emplace_back(at(tok.begin), st.exprs.add<ExprString>(st.exprs.alloc, path ? raw(tok) : strValue(tok)));
-        } else if (tok.kind == DOLLAR_CURLY) {
-            next();
-            auto e = parseExpr();
-            expect(RBRACE, {RBRACE});
-            parts.emplace_back(at(tok.begin), e.e);
-        } else
-            return parts;
     }
 }
 
@@ -989,75 +675,716 @@ Expr * Parser::parsePathStart(const Token & tok)
     return st.exprs.add<ExprPath>(st.exprs.alloc, st.basePath.accessor, path);
 }
 
-E Parser::parseSimple()
+/* The grammar as one state machine. Where the grammar nests, the machine
+   pushes a frame that says where to go on, and jumps to the start of the
+   inner rule; an inner rule ends at `ret`, with its expression in `r`,
+   and `ret` jumps to where the top frame says. So nesting costs a frame
+   on a vector instead of C++ stack, and nesting is only limited by
+   memory, as with Bison. Only the first piece of a big attribute set
+   runs a machine inside another one, so that nests as deep as big sets
+   do */
+E Parser::run(Entry entry, BindsContext bindsCtx)
 {
-    auto & tok = peek();
     auto & ex = st.exprs;
+    const size_t base = frames.size();
+    E r{};
+    /* What the string rules give back */
+    ToBeStringyExpr rs;
+    /* Arguments of the rules that take some */
+    int minPrec = 0;
+    bool interpPath = false;
+
+    auto push = [&](Cont k, const Token * tok = nullptr) -> Frame & {
+        frames.push_back(Frame{.k = k, .tok = tok});
+        return frames.back();
+    };
+    auto top = [&]() -> Frame & { return frames.back(); };
+
+    push(KExit);
+    switch (+entry) {
+    case EntryExpr:
+        goto expr;
+    case EntryBinds:
+        goto binds;
+    case EntryBindsTo:
+        goto bindsLoop;
+    }
+
+ret: {
+    auto & f = top();
+    switch (+f.k) {
+    case KExit:
+        frames.pop_back();
+        assert(frames.size() == base);
+        return r;
+    case KLambda: {
+        auto & tok = *f.tok;
+        auto me = ex.add<ExprLambda>(at(tok.begin), sym(tok), r.e);
+        setDocPosition(me, tok.begin);
+        r = {me, tok.begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KLambdaAtFormals:
+        expect(COLON, {COLON});
+        f.k = KLambdaAtBody;
+        goto function;
+    case KLambdaAtBody: {
+        auto & tok = *f.tok;
+        auto & fs = formals.top();
+        auto arg = sym(tok);
+        st.validateFormals(fs, at(tok.begin), arg);
+        auto me = ex.add<ExprLambda>(st.positions, ex.alloc, at(tok.begin), arg, fs, r.e);
+        setDocPosition(me, tok.begin);
+        formals.pop();
+        r = {me, tok.begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KSetLambdaFormals: {
+        auto & k = peek();
+        if (k.kind == COLON) {
+            next();
+            f.k = KSetLambdaBody;
+            goto function;
+        }
+        if (k.kind == AT) {
+            next();
+            f.tok2 = &expect(ID, {ID});
+            expect(COLON, {COLON});
+            f.k = KSetLambdaAtBody;
+            goto function;
+        }
+        syntaxError(k, {COLON, AT});
+    }
+    case KSetLambdaBody: {
+        auto & tok = *f.tok;
+        auto & fs = formals.top();
+        st.validateFormals(fs);
+        auto me = ex.add<ExprLambda>(st.positions, ex.alloc, at(tok.begin), fs, r.e);
+        setDocPosition(me, tok.begin);
+        formals.pop();
+        r = {me, tok.begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KSetLambdaAtBody: {
+        auto & tok = *f.tok;
+        auto & fs = formals.top();
+        auto arg = sym(*f.tok2);
+        st.validateFormals(fs, at(tok.begin), arg);
+        auto me = ex.add<ExprLambda>(st.positions, ex.alloc, at(tok.begin), arg, fs, r.e);
+        setDocPosition(me, tok.begin);
+        formals.pop();
+        r = {me, tok.begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KAssertCond:
+    case KWithAttrs:
+        expect(SEMICOLON, {SEMICOLON});
+        f.a = r;
+        f.k = f.k == KAssertCond ? KAssertBody : KWithBody;
+        goto function;
+    case KAssertBody:
+        r = {ex.add<ExprAssert>(at(f.tok->begin), f.a.e, r.e), f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    case KWithBody:
+        r = {ex.add<ExprWith>(at(f.tok->begin), f.a.e, r.e), f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    case KLetBinds:
+        expect(IN_KW, {IN_KW, INHERIT});
+        f.a = r;
+        f.k = KLetBody;
+        goto function;
+    case KLetBody: {
+        auto binds = static_cast<ExprAttrs *>(f.a.e);
+        if (!binds->dynamicAttrs->empty())
+            throw ParseError(
+                {.msg = HintFmt("dynamic attributes not allowed in let"), .pos = st.positions[at(f.tok->begin)]});
+        r = {ex.add<ExprLet>(binds, r.e), f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KIfCond:
+        expect(THEN, {THEN});
+        f.a = r;
+        f.k = KIfThen;
+        goto expr;
+    case KIfThen:
+        expect(ELSE, {ELSE});
+        f.b = r;
+        f.k = KIfElse;
+        goto expr;
+    case KIfElse:
+        r = {ex.add<ExprIf>(at(f.tok->begin), f.a.e, f.b.e, r.e), f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    case KIfOp:
+        if (kind() == PIPE_FROM) {
+            /* Right associative */
+            auto & chain = pipes.push();
+            chain.clear();
+            chain.emplace_back(0, r.e);
+            f.a = r;
+            f.k = KPipeFrom;
+            f.tok = &next();
+            minPrec = PImpl;
+            goto op;
+        }
+        if (kind() == PIPE_INTO) {
+            f.a = r;
+            f.k = KPipeInto;
+            f.tok = &next();
+            minPrec = PImpl;
+            goto op;
+        }
+        frames.pop_back();
+        goto ret;
+    case KPipeFrom: {
+        auto & chain = pipes.top();
+        chain.emplace_back(f.tok->begin, r.e);
+        if (kind() == PIPE_FROM) {
+            f.tok = &next();
+            minPrec = PImpl;
+            goto op;
+        }
+        Expr * acc = chain.back().second;
+        for (size_t i = chain.size() - 1; i > 0; i--)
+            acc = makeCall(at(chain[i].first), chain[i - 1].second, acc);
+        pipes.pop();
+        r = {acc, f.a.begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KPipeInto:
+        f.a.e = makeCall(at(f.tok->begin), r.e, f.a.e);
+        if (kind() == PIPE_INTO) {
+            f.tok = &next();
+            minPrec = PImpl;
+            goto op;
+        }
+        r = f.a;
+        frames.pop_back();
+        goto ret;
+    case KNot:
+        r = {ex.add<ExprOpNot>(r.e), f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    case KNegate:
+        r = {
+            ex.add<ExprCall>(at(f.tok->begin), ex.add<ExprVar>(st.s.sub), {ex.add<ExprInt>(0), r.e}), f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    case KOpLhs:
+        f.a = r;
+        f.lastNonAssoc = PNone;
+        goto opLoop;
+    case KOpHasAttr:
+        f.a.e = ex.add<ExprOpHasAttr>(ex.alloc, f.a.e, paths.top());
+        paths.pop();
+        f.lastNonAssoc = PNone;
+        goto opLoop;
+    case KOpRhs: {
+        auto & op = *f.tok;
+        auto & lhs = f.a;
+        auto & rhs = r;
+        Prec p = precs[op.kind];
+        auto pos = at(op.begin);
+        Expr * e;
+        switch (+op.kind) {
+        case EQ:
+            e = ex.add<ExprOpEq>(pos, lhs.e, rhs.e);
+            break;
+        case NEQ:
+            e = ex.add<ExprOpNEq>(pos, lhs.e, rhs.e);
+            break;
+        case LT:
+            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {lhs.e, rhs.e});
+            break;
+        case LEQ:
+            e = ex.add<ExprOpNot>(ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {rhs.e, lhs.e}));
+            break;
+        case GT:
+            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {rhs.e, lhs.e});
+            break;
+        case GEQ:
+            e = ex.add<ExprOpNot>(ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.lessThan), {lhs.e, rhs.e}));
+            break;
+        case AND:
+            e = ex.add<ExprOpAnd>(pos, lhs.e, rhs.e);
+            break;
+        case OR:
+            e = ex.add<ExprOpOr>(pos, lhs.e, rhs.e);
+            break;
+        case IMPL:
+            e = ex.add<ExprOpImpl>(pos, lhs.e, rhs.e);
+            break;
+        case UPDATE:
+            e = ex.add<ExprOpUpdate>(pos, lhs.e, rhs.e);
+            break;
+        case PLUS:
+            e = ex.add<ExprConcatStrings>(ex.alloc, pos, false, {{at(lhs.begin), lhs.e}, {at(rhs.begin), rhs.e}});
+            break;
+        case MINUS:
+            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.sub), {lhs.e, rhs.e});
+            break;
+        case STAR:
+            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.mul), {lhs.e, rhs.e});
+            break;
+        case SLASH:
+            e = ex.add<ExprCall>(pos, ex.add<ExprVar>(st.s.div), {lhs.e, rhs.e});
+            break;
+        case CONCAT:
+            e = ex.add<ExprOpConcatLists>(pos, lhs.e, rhs.e);
+            break;
+        default:
+            unreachable();
+        }
+        lhs.e = e;
+        f.lastNonAssoc = nonAssoc(p) ? p : PNone;
+        goto opLoop;
+    }
+    case KAppFirst:
+        r.e->resetCursedOr();
+        f.a = r;
+        f.b = r;
+        goto appLoop;
+    case KAppArg:
+        if (st.imports && f.b.e == f.a.e)
+            if (auto var = dynamic_cast<ExprVar *>(f.b.e); var && var->name == sImport)
+                if (auto path = dynamic_cast<ExprPath *>(r.e))
+                    st.imports->push_back(path->v.path());
+        f.b.e = makeCall(at(f.a.begin), f.b.e, r.e);
+        warnIfCursedOr(r.e);
+        goto appLoop;
+    case KSelSimple: {
+        auto & tok = peek();
+        if (tok.kind == DOT) {
+            next();
+            f.a = r;
+            f.k = KSelPath;
+            goto attrPath;
+        }
+        if (tok.kind == OR_KW) {
+            next();
+            r = {
+                ex.add<ExprCall>(
+                    at(r.begin), r.e, {ex.add<ExprVar>(at(r.begin), st.s.or_)}, st.positions.add(st.origin, tok.end)),
+                r.begin};
+        }
+        frames.pop_back();
+        goto ret;
+    }
+    case KSelPath:
+        if (kind() == OR_KW) {
+            next();
+            f.k = KSelDefault;
+            goto select;
+        }
+        r = {ex.add<ExprSelect>(ex.alloc, at(f.a.begin), f.a.e, paths.top(), nullptr), f.a.begin};
+        paths.pop();
+        frames.pop_back();
+        goto ret;
+    case KSelDefault: {
+        auto e = ex.add<ExprSelect>(ex.alloc, at(f.a.begin), f.a.e, paths.top(), r.e);
+        warnIfCursedOr(r.e);
+        paths.pop();
+        r = {e, f.a.begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KPathQuote:
+        expect(QUOTE, {QUOTE});
+        addStringy(paths.top(), std::move(rs));
+        frames.pop_back();
+        goto attrPathNext;
+    case KPathDollar:
+        expect(RBRACE, {RBRACE});
+        addStringy(paths.top(), ToBeStringyExpr(r.e));
+        frames.pop_back();
+        goto attrPathNext;
+    case KStrParts:
+        rs = ToBeStringyExpr(ex.add<ExprConcatStrings>(ex.alloc, at(f.tok->begin), true, parts.top()));
+        parts.pop();
+        frames.pop_back();
+        goto ret;
+    case KInterpDollar:
+        expect(RBRACE, {RBRACE});
+        parts.top().emplace_back(at(f.tok->begin), r.e);
+        interpPath = f.path;
+        frames.pop_back();
+        goto interp;
+    case KSimpleQuote:
+        expect(QUOTE, {QUOTE});
+        r = {rs.toExpr(ex), f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    case KIndDollar:
+        expect(RBRACE, {RBRACE});
+        indParts.top().emplace_back(at(f.tok2->begin), r.e);
+        goto indLoop;
+    case KPathInterp: {
+        expect(PATH_END, {STR, PATH_END, DOLLAR_CURLY});
+        auto & ps = parts.top();
+        ps.insert(ps.begin(), {at(f.tok->begin), f.a.e});
+        r = {ex.add<ExprConcatStrings>(ex.alloc, at(f.tok->begin), false, ps), f.tok->begin};
+        parts.pop();
+        frames.pop_back();
+        goto ret;
+    }
+    case KParen:
+        expect(RPAREN, {RPAREN});
+        r = {r.e, f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    case KLetSet:
+    case KRecSet: {
+        expect(RBRACE, {INHERIT, RBRACE});
+        auto binds = static_cast<ExprAttrs *>(r.e);
+        binds->recursive = true;
+        binds->pos = at(f.tok->begin);
+        if (f.k == KLetSet)
+            r = {ex.add<ExprSelect>(ex.alloc, at(f.tok->begin), binds, st.s.body), f.tok->begin};
+        else
+            r = {binds, f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KSet: {
+        expect(RBRACE, {INHERIT});
+        auto binds = static_cast<ExprAttrs *>(r.e);
+        binds->pos = at(f.tok->begin);
+        r = {binds, f.tok->begin};
+        frames.pop_back();
+        goto ret;
+    }
+    case KList:
+        lists.top().push_back(r.e);
+        warnIfCursedOr(r.e);
+        /* As in `imports = [ ./foo.nix ]` */
+        if (st.imports)
+            if (auto path = dynamic_cast<ExprPath *>(r.e); path && path->v.pathStrView().ends_with(".nix"))
+                st.imports->push_back(path->v.path());
+        goto listLoop;
+    case KBindPath:
+        expect(ASSIGN, {DOT, ASSIGN});
+        f.k = KBindValue;
+        goto expr;
+    case KBindValue: {
+        auto & bs = bindsStack.top();
+        expect(SEMICOLON, {SEMICOLON});
+        if (bs.record)
+            bs.record->push_back(Binding{.path = std::move(paths.top()), .begin = f.tok->begin, .e = r});
+        else {
+            if (!bs.attrs)
+                bs.attrs = ex.add<ExprAttrs>();
+            st.addAttr(
+                bs.attrs,
+                std::move(paths.top()),
+                ParserLocation{int(f.tok->begin), 0, 0, 0},
+                r.e,
+                ParserLocation{int(r.begin), 0, 0, 0});
+        }
+        paths.pop();
+        bs.any = true;
+        frames.pop_back();
+        goto bindsLoop;
+    }
+    case KInheritFrom: {
+        expect(RPAREN, {RPAREN});
+        auto & inh = inherits.top();
+        inh.from = r.e;
+        inh.fromBegin = r.begin;
+        frames.pop_back();
+        goto inheritNames;
+    }
+    case KInheritQuote:
+    case KInheritDollar: {
+        auto & tok = *f.tok;
+        ToBeStringyExpr x;
+        if (f.k == KInheritQuote) {
+            expect(QUOTE, {QUOTE});
+            x = std::move(rs);
+        } else {
+            expect(RBRACE, {RBRACE});
+            x = ToBeStringyExpr(r.e);
+        }
+        auto & names = inherits.top().names;
+        x.visit(
+            overloaded{
+                [&](std::string_view str) { names.emplace_back(st.symbols.create(str), at(tok.begin)); },
+                [&](Expr * expr) {
+                    throw ParseError(
+                        {.msg = HintFmt("dynamic attributes not allowed in inherit"),
+                         .pos = st.positions[at(tok.begin)]});
+                }});
+        frames.pop_back();
+        goto inheritNames;
+    }
+    case KFormalDefault:
+        formals.top().formals.emplace_back(Formal{at(f.tok->begin), sym(*f.tok), r.e});
+        goto formalNext;
+    }
+    unreachable();
+}
+
+    /* expr: function
+
+       function: ID ':' function | ID '@' formals ':' function
+       | formals ':' function | formals '@' ID ':' function
+       | ASSERT expr ';' function | WITH expr ';' function
+       | LET binds IN function | expr_if */
+expr:
+function: {
+    auto & tok = peek();
+    switch (+tok.kind) {
+    case ID: {
+        auto k = kindAt(1);
+        if (k == COLON) {
+            next();
+            next();
+            push(KLambda, &tok);
+            goto function;
+        }
+        if (k == AT) {
+            next();
+            next();
+            push(KLambdaAtFormals, &tok);
+            goto formalSet;
+        }
+        break;
+    }
+    case LBRACE:
+        if (isFormals()) {
+            push(KSetLambdaFormals, &tok);
+            goto formalSet;
+        }
+        break;
+    case ASSERT:
+        next();
+        push(KAssertCond, &tok);
+        goto expr;
+    case WITH:
+        next();
+        push(KWithAttrs, &tok);
+        goto expr;
+    case LET:
+        if (kindAt(1) == LBRACE)
+            break;
+        next();
+        push(KLetBinds, &tok);
+        bindsCtx = LetIn;
+        goto binds;
+    default:
+        break;
+    }
+    goto exprIf;
+}
+
+    /* expr_if: IF expr THEN expr ELSE expr | expr_pipe_from | expr_pipe_into
+       | expr_op */
+exprIf: {
+    auto & tok = peek();
+    if (tok.kind == IF) {
+        next();
+        push(KIfCond, &tok);
+        goto expr;
+    }
+    push(KIfOp);
+    minPrec = PImpl;
+    goto op;
+}
+
+    /* Operators by precedence climbing: a unary expression, then every
+       operator that binds at least `minPrec` with its right operand */
+op:
+    push(KOpLhs).minPrec = minPrec;
+    goto unary;
+
+opLoop: {
+    auto & f = top();
+    auto & opTok = peek();
+    Prec p = precs[opTok.kind];
+    if (p == PNone || p < f.minPrec) {
+        r = f.a;
+        frames.pop_back();
+        goto ret;
+    }
+    if (p == f.lastNonAssoc)
+        syntaxError(opTok);
+    next();
+    if (opTok.kind == QUESTION) {
+        f.k = KOpHasAttr;
+        goto attrPath;
+    }
+    f.k = KOpRhs;
+    f.tok = &opTok;
+    minPrec = rightAssoc(opTok.kind) ? p : p + 1;
+    goto op;
+}
+
+unary: {
+    auto & tok = peek();
+    if (tok.kind == BANG) {
+        next();
+        push(KNot, &tok);
+        minPrec = PNot + 1;
+        goto op;
+    }
+    if (tok.kind == MINUS) {
+        next();
+        push(KNegate, &tok);
+        minPrec = PNegate + 1;
+        goto op;
+    }
+    push(KAppFirst);
+    goto select;
+}
+
+    /* f.a is the function, f.b the call built so far */
+appLoop:
+    if (simpleStarts[kind()]) {
+        top().k = KAppArg;
+        goto select;
+    }
+    r = {top().b.e, top().a.begin};
+    frames.pop_back();
+    goto ret;
+
+    /* expr_select: expr_simple '.' attrpath ['or' expr_select]
+       | expr_simple OR_KW | expr_simple */
+select:
+    push(KSelSimple);
+    goto simple;
+
+    /* attrpath, onto `paths` */
+attrPath:
+    paths.push().clear();
+attrPathLoop: {
+    auto & tok = peek();
+    auto & path = paths.top();
+    switch (+tok.kind) {
+    case ID:
+        next();
+        path.emplace_back(sym(tok));
+        break;
+    case OR_KW:
+        next();
+        path.emplace_back(st.symbols.create("or"));
+        break;
+    case QUOTE:
+        next();
+        push(KPathQuote);
+        goto stringParts;
+    case DOLLAR_CURLY:
+        next();
+        push(KPathDollar);
+        goto expr;
+    default:
+        syntaxError(tok, {ID, OR_KW, DOLLAR_CURLY, QUOTE});
+    }
+}
+attrPathNext:
+    if (kind() != DOT)
+        goto ret;
+    next();
+    goto attrPathLoop;
+
+    /* The parts of a string, into `rs` */
+stringParts: {
+    auto & tok = peek();
+    if (tok.kind == STR && kindAt(1) != DOLLAR_CURLY) {
+        next();
+        rs = ToBeStringyExpr(strValue(tok));
+        goto ret;
+    }
+    if (tok.kind != STR && tok.kind != DOLLAR_CURLY) {
+        rs = ToBeStringyExpr(std::string_view());
+        goto ret;
+    }
+    push(KStrParts, &tok);
+    parts.push().clear();
+    interpPath = false;
+    goto interp;
+}
+
+    /* Literal parts and interpolations, onto `parts.top()` */
+interp: {
+    auto & tok = peek();
+    if (tok.kind == STR) {
+        next();
+        parts.top().emplace_back(
+            at(tok.begin), ex.add<ExprString>(ex.alloc, interpPath ? raw(tok) : strValue(tok)));
+        goto interp;
+    }
+    if (tok.kind == DOLLAR_CURLY) {
+        next();
+        push(KInterpDollar, &tok).path = interpPath;
+        goto expr;
+    }
+    goto ret;
+}
+
+simple: {
+    auto & tok = peek();
     switch (+tok.kind) {
     case ID: {
         next();
         auto s = raw(tok);
         if (s == "__curPos")
-            return {ex.add<ExprPos>(at(tok.begin)), tok.begin};
-        return {ex.add<ExprVar>(at(tok.begin), sym(tok)), tok.begin};
+            r = {ex.add<ExprPos>(at(tok.begin)), tok.begin};
+        else
+            r = {ex.add<ExprVar>(at(tok.begin), sym(tok)), tok.begin};
+        goto ret;
     }
     case INT_LIT:
         next();
-        return {ex.add<ExprInt>(NixInt(int64_t(tk.numbers[tok.aux]))), tok.begin};
+        r = {ex.add<ExprInt>(NixInt(int64_t(tk.numbers[tok.aux]))), tok.begin};
+        goto ret;
     case FLOAT_LIT:
         next();
-        return {ex.add<ExprFloat>(std::bit_cast<double>(tk.numbers[tok.aux])), tok.begin};
-    case QUOTE: {
+        r = {ex.add<ExprFloat>(std::bit_cast<double>(tk.numbers[tok.aux])), tok.begin};
+        goto ret;
+    case QUOTE:
         next();
-        auto parts = parseStringParts();
-        expect(QUOTE, {QUOTE});
-        return {parts.toExpr(ex), tok.begin};
-    }
-    case IND_STRING_OPEN: {
+        push(KSimpleQuote, &tok);
+        goto stringParts;
+    case IND_STRING_OPEN:
         next();
-        std::vector<std::pair<PosIdx, std::variant<Expr *, StringToken>>> parts;
-        while (true) {
-            auto & part = peek();
-            if (part.kind == IND_STR) {
-                next();
-                parts.emplace_back(at(part.begin), indStrValue(part));
-            } else if (part.kind == DOLLAR_CURLY) {
-                next();
-                auto e = parseExpr();
-                expect(RBRACE, {RBRACE});
-                parts.emplace_back(at(part.begin), e.e);
-            } else
-                break;
-        }
-        expect(IND_STRING_CLOSE, {IND_STR, DOLLAR_CURLY, IND_STRING_CLOSE});
-        return {st.stripIndentation(at(tok.begin), parts), tok.begin};
-    }
+        push(KIndDollar, &tok);
+        indParts.push().clear();
+        goto indLoop;
     case PATH:
     case HPATH: {
         next();
         auto start = parsePathStart(tok);
         if (kind() == PATH_END) {
             next();
-            return {start, tok.begin};
+            r = {start, tok.begin};
+            goto ret;
         }
         /* The grammar only takes a literal segment before an interpolation */
         if (kind() == STR && kindAt(1) != DOLLAR_CURLY)
             syntaxError(t[1], {DOLLAR_CURLY});
-        auto parts = parseInterpolated(true);
-        expect(PATH_END, {STR, PATH_END, DOLLAR_CURLY});
-        parts.insert(parts.begin(), {at(tok.begin), start});
-        return {ex.add<ExprConcatStrings>(ex.alloc, at(tok.begin), false, parts), tok.begin};
+        push(KPathInterp, &tok).a.e = start;
+        parts.push().clear();
+        interpPath = true;
+        goto interp;
     }
     case SPATH: {
         next();
         auto s = raw(tok);
         std::string_view path(s.data() + 1, s.size() - 2);
-        return {
+        r = {
             ex.add<ExprCall>(
                 at(tok.begin),
                 ex.add<ExprVar>(st.s.findFile),
                 {ex.add<ExprVar>(st.s.nixPath), ex.add<ExprString>(ex.alloc, path)}),
             tok.begin};
+        goto ret;
     }
     case URI: {
         next();
@@ -1070,76 +1397,120 @@ E Parser::parseSimple()
                      s),
                  .pos = st.positions[at(tok.begin)]});
         });
-        return {ex.add<ExprString>(ex.alloc, s), tok.begin};
+        r = {ex.add<ExprString>(ex.alloc, s), tok.begin};
+        goto ret;
     }
-    case LPAREN: {
+    case LPAREN:
         next();
-        auto e = parseExpr();
-        expect(RPAREN, {RPAREN});
-        return {e.e, tok.begin};
-    }
-    case LET: {
-        next();
-        expect(LBRACE, {LBRACE});
-        auto binds = parseBinds(RecBraces);
-        expect(RBRACE, {INHERIT, RBRACE});
-        binds->recursive = true;
-        binds->pos = at(tok.begin);
-        return {ex.add<ExprSelect>(ex.alloc, at(tok.begin), binds, st.s.body), tok.begin};
-    }
-    case REC: {
+        push(KParen, &tok);
+        goto expr;
+    case LET:
+    case REC:
         next();
         expect(LBRACE, {LBRACE});
-        auto binds = parseBinds(RecBraces);
-        expect(RBRACE, {INHERIT, RBRACE});
-        binds->recursive = true;
-        binds->pos = at(tok.begin);
-        return {binds, tok.begin};
-    }
-    case LBRACE: {
+        push(tok.kind == LET ? KLetSet : KRecSet, &tok);
+        bindsCtx = RecBraces;
+        goto binds;
+    case LBRACE:
         next();
         if (kind() == RBRACE) {
             next();
-            return {ex.add<ExprAttrs>(at(tok.begin)), tok.begin};
+            r = {ex.add<ExprAttrs>(at(tok.begin)), tok.begin};
+            goto ret;
         }
-        auto binds = parseBinds(Braces);
-        expect(RBRACE, {INHERIT});
-        binds->pos = at(tok.begin);
-        return {binds, tok.begin};
-    }
-    case LBRACKET: {
+        push(KSet, &tok);
+        bindsCtx = Braces;
+        goto binds;
+    case LBRACKET:
         next();
-        std::pmr::vector<Expr *> list;
-        while (simpleStarts[kind()]) {
-            auto e = parseExprSelect();
-            list.push_back(e.e);
-            warnIfCursedOr(e.e);
-            /* As in `imports = [ ./foo.nix ]` */
-            if (st.imports)
-                if (auto path = dynamic_cast<ExprPath *>(e.e); path && path->v.pathStrView().ends_with(".nix"))
-                    st.imports->push_back(path->v.path());
-        }
-        expect(RBRACKET, {});
-        return {ex.add<ExprList>(ex.alloc, list), tok.begin};
-    }
+        push(KList, &tok);
+        lists.push().clear();
+        goto listLoop;
     default:
         syntaxError(tok);
     }
 }
 
-ExprAttrs * Parser::parseBinds(BindsContext ctx)
-{
+    /* The frame is KIndDollar, with the opening token in `tok` */
+indLoop: {
+    auto & part = peek();
+    if (part.kind == IND_STR) {
+        next();
+        indParts.top().emplace_back(at(part.begin), indStrValue(part));
+        goto indLoop;
+    }
+    if (part.kind == DOLLAR_CURLY) {
+        next();
+        top().tok2 = &part;
+        goto expr;
+    }
+    expect(IND_STRING_CLOSE, {IND_STR, DOLLAR_CURLY, IND_STRING_CLOSE});
+    r = {st.stripIndentation(at(top().tok->begin), indParts.top()), top().tok->begin};
+    indParts.pop();
+    frames.pop_back();
+    goto ret;
+}
+
+    /* The frame is KList */
+listLoop:
+    if (simpleStarts[kind()])
+        goto select;
+    expect(RBRACKET, {});
+    r = {ex.add<ExprList>(ex.alloc, lists.top()), top().tok->begin};
+    lists.pop();
+    frames.pop_back();
+    goto ret;
+
+    /* binds, with the context in `bindsCtx`, into an ExprAttrs in `r` */
+binds: {
+    /* Not in `bindsStack` yet, which the first piece pushes onto */
     ExprAttrs * attrs = nullptr;
     bool any = false;
-
     bool more = true;
-    if (ctx == Braces || ctx == RecBraces)
+    if (bindsCtx == Braces || bindsCtx == RecBraces)
         more = parseBindsInPieces(attrs, any);
+    bindsStack.push() = Binds{.attrs = attrs, .any = any, .ctx = bindsCtx};
     if (more)
-        parseBindsTo(attrs, any, nullptr, nullptr);
+        goto bindsLoop;
+    goto bindsEnd;
+}
 
-    if (!any) {
-        switch (+ctx) {
+bindsLoop: {
+    auto & bs = bindsStack.top();
+    if (bs.limit && t >= bs.limit) {
+        bs.more = true;
+        goto bindsStop;
+    }
+    auto & tok = peek();
+    switch (+tok.kind) {
+    case ID:
+    case OR_KW:
+    case QUOTE:
+    case DOLLAR_CURLY:
+        push(KBindPath, &tok);
+        goto attrPath;
+    case INHERIT:
+        next();
+        inherits.push() = Inherit{};
+        if (kind() == LPAREN) {
+            next();
+            push(KInheritFrom);
+            goto expr;
+        }
+        goto inheritNames;
+    default:
+        bs.more = false;
+        goto bindsStop;
+    }
+}
+
+bindsStop:
+    if (bindsStack.top().entry)
+        goto ret;
+bindsEnd: {
+    auto & bs = bindsStack.top();
+    if (!bs.any) {
+        switch (+bs.ctx) {
         case Braces:
         case Repl:
             syntaxError(peek(), {INHERIT});
@@ -1147,58 +1518,114 @@ ExprAttrs * Parser::parseBinds(BindsContext ctx)
             break;
         }
     }
-
-    if (!attrs)
-        attrs = st.exprs.add<ExprAttrs>();
-    return attrs;
+    if (!bs.attrs)
+        bs.attrs = ex.add<ExprAttrs>();
+    r = {bs.attrs, 0};
+    bindsStack.pop();
+    goto ret;
 }
 
-bool Parser::parseBindsTo(ExprAttrs *& attrs, bool & any, const Token * limit, std::vector<Binding> * record)
-{
-    while (!limit || t < limit) {
-        auto & tok = peek();
-        switch (+tok.kind) {
-        case ID:
-        case OR_KW:
-        case QUOTE:
-        case DOLLAR_CURLY: {
-            auto path = parseAttrPath();
-            expect(ASSIGN, {DOT, ASSIGN});
-            auto e = parseExpr();
-            expect(SEMICOLON, {SEMICOLON});
-            if (record)
-                record->push_back(Binding{.path = std::move(path), .begin = tok.begin, .e = e});
-            else {
-                if (!attrs)
-                    attrs = st.exprs.add<ExprAttrs>();
-                st.addAttr(
-                    attrs,
-                    std::move(path),
-                    ParserLocation{int(tok.begin), 0, 0, 0},
-                    e.e,
-                    ParserLocation{int(e.begin), 0, 0, 0});
-            }
-            any = true;
-            continue;
-        }
-        case INHERIT: {
-            next();
-            auto inherit = parseInherit();
-            if (record)
-                record->push_back(Binding{.inherit = std::move(inherit)});
-            else {
-                if (!attrs)
-                    attrs = st.exprs.add<ExprAttrs>();
-                addInherit(attrs, std::move(inherit));
-            }
-            any = true;
-            continue;
-        }
-        default:
-            return false;
-        }
+inheritNames: {
+    auto & tok = peek();
+    auto & names = inherits.top().names;
+    if (tok.kind == ID) {
+        next();
+        names.emplace_back(sym(tok), at(tok.begin));
+        goto inheritNames;
     }
-    return true;
+    if (tok.kind == OR_KW) {
+        next();
+        names.emplace_back(st.symbols.create("or"), at(tok.begin));
+        goto inheritNames;
+    }
+    if (tok.kind == QUOTE) {
+        next();
+        push(KInheritQuote, &tok);
+        goto stringParts;
+    }
+    if (tok.kind == DOLLAR_CURLY) {
+        next();
+        push(KInheritDollar, &tok);
+        goto expr;
+    }
+    expect(SEMICOLON, {});
+    auto & bs = bindsStack.top();
+    if (bs.record)
+        bs.record->push_back(Binding{.inherit = std::move(inherits.top())});
+    else {
+        if (!bs.attrs)
+            bs.attrs = ex.add<ExprAttrs>();
+        addInherit(bs.attrs, std::move(inherits.top()));
+    }
+    inherits.pop();
+    bs.any = true;
+    goto bindsLoop;
+}
+
+    /* formals, onto `formals` */
+formalSet: {
+    auto & fs = formals.push();
+    fs.formals.clear();
+    fs.ellipsis = false;
+    expect(LBRACE, {LBRACE});
+    if (kind() == RBRACE) {
+        next();
+        goto ret;
+    }
+    if (kind() == ELLIPSIS) {
+        next();
+        expect(RBRACE, {RBRACE});
+        fs.ellipsis = true;
+        goto ret;
+    }
+}
+formalLoop: {
+    auto & id = expect(ID, {ID, ELLIPSIS, RBRACE});
+    if (kind() == QUESTION) {
+        next();
+        push(KFormalDefault, &id);
+        goto expr;
+    }
+    formals.top().formals.emplace_back(Formal{at(id.begin), sym(id), nullptr});
+    goto formalCheck;
+}
+formalNext:
+    frames.pop_back();
+formalCheck: {
+    auto k = kind();
+    if (k == RBRACE) {
+        next();
+        goto ret;
+    }
+    if (k != COMMA)
+        syntaxError(peek(), {RBRACE, COMMA});
+    next();
+    k = kind();
+    if (k == RBRACE) {
+        next();
+        goto ret;
+    }
+    if (k == ELLIPSIS) {
+        next();
+        expect(RBRACE, {RBRACE});
+        formals.top().ellipsis = true;
+        goto ret;
+    }
+    goto formalLoop;
+}
+}
+
+bool Parser::runBindsTo(ExprAttrs *& attrs, bool & any, const Token * limit, std::vector<Binding> * record)
+{
+    auto & bs = bindsStack.push();
+    bs = Binds{.attrs = attrs, .any = any, .limit = limit, .record = record, .entry = true};
+    run(EntryBindsTo);
+    auto & done = bindsStack.top();
+    attrs = done.attrs;
+    any = done.any;
+    bool more = done.more;
+    bindsStack.pop();
+    return more;
 }
 
 void Parser::findBigSets()
@@ -1300,14 +1727,12 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
     };
     std::vector<std::pair<PosIdx, DocComment>> docs;
     st.deferredDocs = &docs;
-    /* The first piece changes it meanwhile */
-    unsigned startDepth = depth;
     bool ran = WorkPool::shared().tryRun(
         k,
         [&](size_t i) {
             if (i == 0) {
                 try {
-                    more = parseBindsTo(attrs, any, base + cuts[1], nullptr);
+                    more = runBindsTo(attrs, any, base + cuts[1], nullptr);
                 } catch (...) {
                     error = std::current_exception();
                 }
@@ -1322,11 +1747,10 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
                     pst.imports = &r.imports;
                 Parser p(pst, ls, text, tk);
                 p.t = base + cuts[i];
-                p.depth = startDepth;
                 p.inPiece = true;
                 ExprAttrs * unused = nullptr;
                 bool unusedAny = false;
-                r.ok = p.parseBindsTo(unused, unusedAny, base + cuts[i + 1], &r.bindings) && p.t == base + cuts[i + 1];
+                r.ok = p.runBindsTo(unused, unusedAny, base + cuts[i + 1], &r.bindings) && p.t == base + cuts[i + 1];
             } catch (...) {
             }
         },
@@ -1340,13 +1764,13 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
 
     for (size_t i = 1; i < k && more; i++) {
         if (t < base + cuts[i])
-            more = parseBindsTo(attrs, any, base + cuts[i], nullptr);
+            more = runBindsTo(attrs, any, base + cuts[i], nullptr);
         if (!more)
             break;
         auto & r = results[i];
         if (t != base + cuts[i] || !r.ok) {
             if (t < base + cuts[i + 1])
-                more = parseBindsTo(attrs, any, base + cuts[i + 1], nullptr);
+                more = runBindsTo(attrs, any, base + cuts[i + 1], nullptr);
             continue;
         }
         addDocs(r.docs);
@@ -1369,52 +1793,6 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
         t = base + cuts[i + 1];
     }
     return more;
-}
-
-Parser::Inherit Parser::parseInherit()
-{
-    Inherit r;
-    if (kind() == LPAREN) {
-        next();
-        auto e = parseExpr();
-        expect(RPAREN, {RPAREN});
-        r.from = e.e;
-        r.fromBegin = e.begin;
-    }
-
-    auto & names = r.names;
-    while (true) {
-        auto & tok = peek();
-        if (tok.kind == ID) {
-            next();
-            names.emplace_back(sym(tok), at(tok.begin));
-        } else if (tok.kind == OR_KW) {
-            next();
-            names.emplace_back(st.symbols.create("or"), at(tok.begin));
-        } else if (tok.kind == QUOTE || tok.kind == DOLLAR_CURLY) {
-            next();
-            ToBeStringyExpr x;
-            if (tok.kind == QUOTE) {
-                x = parseStringParts();
-                expect(QUOTE, {QUOTE});
-            } else {
-                auto e = parseExpr();
-                expect(RBRACE, {RBRACE});
-                x = ToBeStringyExpr(e.e);
-            }
-            x.visit(
-                overloaded{
-                    [&](std::string_view str) { names.emplace_back(st.symbols.create(str), at(tok.begin)); },
-                    [&](Expr * expr) {
-                        throw ParseError(
-                            {.msg = HintFmt("dynamic attributes not allowed in inherit"),
-                             .pos = st.positions[at(tok.begin)]});
-                    }});
-        } else
-            break;
-    }
-    expect(SEMICOLON, {});
-    return r;
 }
 
 void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
