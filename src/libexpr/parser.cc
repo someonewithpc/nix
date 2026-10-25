@@ -623,6 +623,8 @@ class Parser
         Stack<FormalsBuilder> formals;
         Stack<Inherit> inherits;
         Stack<Binds> bindsStack;
+        /* Where `parsePathStart` builds a path */
+        std::string pathBuf;
         bool busy = false;
 
         /* Drop what a big file grew, which the next files would not use */
@@ -672,6 +674,7 @@ class Parser
     Stack<FormalsBuilder> & formals = sc.formals;
     Stack<Inherit> & inherits = sc.inherits;
     Stack<Binds> & bindsStack = sc.bindsStack;
+    std::string & pathBuf = sc.pathBuf;
 
     enum Entry { EntryExpr, EntryBinds, EntryBindsTo };
 
@@ -749,6 +752,32 @@ bool Parser::isFormals()
     }
 }
 
+/* `CanonPath(literal, CanonPath(base)).abs()` into `out`, without the
+   three strings that makes; `base` is canonical */
+void canonPathLiteral(std::string & out, std::string_view base, std::string_view literal)
+{
+    if (literal.starts_with('/') || base == "/")
+        out.clear();
+    else
+        out.assign(base);
+    while (!literal.empty()) {
+        auto slash = literal.find('/');
+        auto comp = literal.substr(0, slash);
+        literal = slash == literal.npos ? std::string_view() : literal.substr(slash + 1);
+        if (comp.empty() || comp == ".")
+            continue;
+        if (comp == "..") {
+            if (!out.empty())
+                out.erase(out.rfind('/'));
+            continue;
+        }
+        out += '/';
+        out += comp;
+    }
+    if (out.empty())
+        out = '/';
+}
+
 Expr * Parser::parsePathStart(const Token & tok)
 {
     std::string_view literal = raw(tok);
@@ -783,11 +812,11 @@ Expr * Parser::parsePathStart(const Token & tok)
         /* Absolute paths are always interpreted relative to the root
            filesystem accessor, rather than the accessor of the current Nix
            expression */
-        auto path = CanonPath(literal).abs();
+        canonPathLiteral(pathBuf, "/", literal);
         /* add back in the trailing '/' to the first segment */
         if (literal.size() > 1 && literal.back() == '/')
-            path += '/';
-        return st.exprs.add<ExprPath>(st.exprs.alloc, st.rootFS, path);
+            pathBuf += '/';
+        return st.exprs.add<ExprPath>(st.exprs.alloc, st.rootFS, pathBuf);
     }
 
     /* check for short path literals */
@@ -800,11 +829,11 @@ Expr * Parser::parsePathStart(const Token & tok)
         return std::nullopt;
     });
 
-    auto path = CanonPath(literal, st.basePath.path).abs();
+    canonPathLiteral(pathBuf, st.basePath.path.abs(), literal);
     /* add back in the trailing '/' to the first segment */
     if (literal.size() > 1 && literal.back() == '/')
-        path += '/';
-    return st.exprs.add<ExprPath>(st.exprs.alloc, st.basePath.accessor, path);
+        pathBuf += '/';
+    return st.exprs.add<ExprPath>(st.exprs.alloc, st.basePath.accessor, pathBuf);
 }
 
 /* The grammar as one state machine. Where the grammar nests, the machine
