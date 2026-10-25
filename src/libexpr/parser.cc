@@ -293,7 +293,7 @@ class Parser
         return st.positions.add(st.origin, offset);
     }
 
-    [[noreturn]] void lexError(const Token & tok)
+    [[noreturn, gnu::noinline, gnu::cold]] void lexError(const Token & tok)
     {
         auto & err = tk.errors[tok.aux];
         auto pos = st.positions[at(err.offset)];
@@ -319,14 +319,14 @@ class Parser
         unreachable();
     }
 
-    const Token & peek()
+    [[gnu::always_inline]] const Token & peek()
     {
         if (t->kind == LEX_ERROR) [[unlikely]]
             lexError(*t);
         return *t;
     }
 
-    Kind kind()
+    [[gnu::always_inline]] Kind kind()
     {
         return peek().kind;
     }
@@ -343,14 +343,14 @@ class Parser
         return tok.kind;
     }
 
-    const Token & next()
+    [[gnu::always_inline]] const Token & next()
     {
         auto & tok = peek();
         t++;
         return tok;
     }
 
-    [[noreturn]] void syntaxError(const Token & tok, std::initializer_list<Kind> expected = {})
+    [[noreturn, gnu::noinline, gnu::cold]] void syntaxError(const Token & tok, std::initializer_list<Kind> expected = {})
     {
         std::string msg = "syntax error, unexpected ";
         msg += kindName(tok.kind);
@@ -368,7 +368,7 @@ class Parser
         throw ParseError({.msg = HintFmt(msg), .pos = st.positions[at(eof ? tok.end : tok.begin)]}).setIncomplete(eof);
     }
 
-    const Token & expect(Kind k, std::initializer_list<Kind> expected)
+    [[gnu::always_inline]] const Token & expect(Kind k, std::initializer_list<Kind> expected)
     {
         auto & tok = peek();
         if (tok.kind != k)
