@@ -203,10 +203,31 @@ build, while -O2 or -O3 with LTO is 3-4% slower on lex+parse. Under LTO
 GCC stops inlining `emit`, `scan` and `sym` into the hot rules, and
 forcing them inline did not win it back
 
+### Memory on beryllium
+
+NixOS minimal eval, dev builds, peak RSS: Bison 675 MB, branch 835 MB
+with defaults, 709 MB with prefetching and pool threads off. Peak RSS
+is stable to a few MB between runs, so these differences are real
+
+- With everything off the branch is 34 MB over Bison. The token buffer
+  of hackage-packages.nix, live while it is parsed (33 MB now that the
+  lexer reserves one token per 8 bytes), and the symbol cache (8 MB for
+  96k symbols) account for that
+- The token pool used to keep that buffer for the rest of the process
+  (63 MB, reserved at one token per 4 bytes). It now keeps buffers up to
+  4 MB
+- Lexer chunks add 23 MB and parser pieces 69 MB. Nearly all of that is
+  mimalloc: each new thread heap commits and touches arena memory
+  eagerly. With `MIMALLOC_ARENA_EAGER_COMMIT=0` the branch is at 724 MB
+  and Bison at 652 MB, for 1-2% more eval time. parse-bench, which does
+  not link mimalloc, shows only 6 MB for eight parser threads
+- All pieces were accepted in both hackage and the NixOS eval, so none
+  of the AST is built twice
+
 ## Left to do
 
-- Find the 65 MB the branch uses over Bison in a NixOS eval with
-  prefetching and pool threads off
+- Decide on mimalloc eager commit, which is most of the memory the
+  pool threads cost
 - Time the goto parser against the recursive one on a quiet machine
 - The io_uring loader with a huge-page buffer, if it is still wanted given
   the numbers above
