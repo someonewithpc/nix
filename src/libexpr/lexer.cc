@@ -2,6 +2,7 @@
 #include "lexer-simd.hh"
 #include "work-pool.hh"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <bit>
@@ -1218,7 +1219,9 @@ unsigned maxChunks()
     static const unsigned v = [] {
         if (auto e = getenv("NIX_LEXER_THREADS"))
             return unsigned(std::stoul(e));
-        return std::max(1u, std::thread::hardware_concurrency() * 3 / 4);
+        /* Each pool thread keeps a few MB of caches and allocator heap, and
+           past 8 the big files hardly get faster */
+        return std::clamp(std::thread::hardware_concurrency() * 3 / 4, 1u, 8u);
     }();
     return v;
 }
