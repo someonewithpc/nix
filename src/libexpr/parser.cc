@@ -1951,8 +1951,7 @@ void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
 }
 
 Expr * parse(
-    char * text,
-    size_t length,
+    ParseBuffer & buf,
     Pos::Origin origin,
     const SourcePath & basePath,
     Exprs & exprs,
@@ -1965,10 +1964,12 @@ Expr * parse(
     std::vector<SourcePath> * imports,
     bool quiet)
 {
+    char * text = buf.data();
+    size_t length = buf.size();
     LexerState lexerState{
         .positionToDocComment = docComments,
         .positions = positions,
-        .origin = positions.addOrigin(origin, length),
+        .origin = positions.addOrigin(origin, length + 2),
     };
     ParserState state{
         .lexerState = lexerState,
@@ -1983,8 +1984,7 @@ Expr * parse(
         .imports = imports,
     };
 
-    assert(length >= 2 && text[length - 1] == 0 && text[length - 2] == 0);
-    auto tokens = lexer::lex(text, length - 2, lexerState, repl);
+    auto tokens = lexer::lex(text, length, lexerState, repl);
     Finally recycle([&] { lexer::recycle(std::move(tokens)); });
     Parser parser(state, lexerState, text, tokens);
     return parser.parseStart(repl);
@@ -1993,8 +1993,7 @@ Expr * parse(
 } // namespace
 
 Expr * parseExprFromBuf(
-    char * text,
-    size_t length,
+    ParseBuffer & text,
     Pos::Origin origin,
     const SourcePath & basePath,
     Exprs & exprs,
@@ -2006,13 +2005,11 @@ Expr * parseExprFromBuf(
     std::vector<SourcePath> * imports,
     bool quiet)
 {
-    return parse(
-        text, length, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, false, imports, quiet);
+    return parse(text, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, false, imports, quiet);
 }
 
 ExprAttrs * parseReplBindingsFromBuf(
-    char * text,
-    size_t length,
+    ParseBuffer & text,
     Pos::Origin origin,
     const SourcePath & basePath,
     Exprs & exprs,
@@ -2023,7 +2020,7 @@ ExprAttrs * parseReplBindingsFromBuf(
     const ref<SourceAccessor> rootFS)
 {
     auto result =
-        parse(text, length, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, true, nullptr, false);
+        parse(text, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, true, nullptr, false);
     assert(result);
     auto bindings = dynamic_cast<ExprAttrs *>(result);
     assert(bindings);

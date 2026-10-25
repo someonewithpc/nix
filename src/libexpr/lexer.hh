@@ -141,8 +141,8 @@ struct Tokens
 /**
  * Split `text` into tokens
  *
- * `text` must be followed by two NUL bytes, which are not part of
- * `length`; escape sequences are decoded in place, so the buffer must be
+ * `text` is a `ParseBuffer`'s, so zero bytes follow it up to the end of
+ * its last 64-byte block and for a whole block after; escape sequences are decoded in place, so the buffer must be
  * writable and must outlive the tokens; doc comments are recorded in
  * `lexerState` exactly where the flex lexer recorded them
  */

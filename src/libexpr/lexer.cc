@@ -402,15 +402,8 @@ private:
     const simd::Masks & masksFor(uint32_t block)
     {
         if (block != maskBlock) {
-            uint32_t start = block << 6;
-            /* Past the content are the two NULs, and then maybe nothing */
-            if (start + 64 <= n + 2)
-                classify(reinterpret_cast<const unsigned char *>(s + start), masks);
-            else {
-                unsigned char tail[64] = {};
-                memcpy(tail, s + start, n + 2 - start);
-                classify(tail, masks);
-            }
+            /* The buffer's padding covers the rest of the last block */
+            classify(reinterpret_cast<const unsigned char *>(s + (block << 6)), masks);
             maskBlock = block;
         }
         return masks;

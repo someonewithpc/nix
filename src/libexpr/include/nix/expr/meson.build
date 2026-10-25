@@ -26,6 +26,7 @@ headers = [ config_pub_h ] + files(
   'get-drvs.hh',
   'json-to-value.hh',
   'nixexpr.hh',
+  'parse-buffer.hh',
   'parser-state.hh',
   'parser.hh',
   'primops.hh',

@@ -121,6 +121,7 @@ sources = files(
   'lexer-simd.cc',
   'lexer.cc',
   'nixexpr.cc',
+  'parse-buffer.cc',
   'parser.cc',
   'paths.cc',
   'primops.cc',

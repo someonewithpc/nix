@@ -28,6 +28,25 @@
 using namespace nix;
 using Clock = std::chrono::steady_clock;
 
+#if __has_include("nix/expr/parse-buffer.hh")
+#  include "nix/expr/parse-buffer.hh"
+static ParseBuffer bufferOf(const std::string & s)
+{
+    return ParseBuffer(s);
+}
+#  define BUF_ARGS(b) b
+#else
+static std::string bufferOf(const std::string & s)
+{
+    std::string b;
+    b.reserve(s.size() + 2);
+    b.append(s);
+    b.append("\0\0", 2);
+    return b;
+}
+#  define BUF_ARGS(b) b.data(), b.size()
+#endif
+
 int main(int argc, char ** argv)
 {
     if (argc < 2) {
@@ -74,14 +93,12 @@ int main(int argc, char ** argv)
         dump.open(dumpPath);
 
     auto parseOne = [&](size_t i, bool show) -> std::string {
-        std::string buf = sources[i];
-        buf.append("\0\0", 2);
+        auto buf = bufferOf(sources[i]);
         auto path = state.rootPath(CanonPath(paths[i]));
         DocCommentMap docComments;
         try {
             Expr * e = parseExprFromBuf(
-                buf.data(),
-                buf.size(),
+                BUF_ARGS(buf),
                 Pos::Origin(path),
                 path.parent(),
                 state.mem.exprs,
@@ -166,15 +183,13 @@ int main(int argc, char ** argv)
     for (int r = 0; r < reps; r++) {
         for (size_t i = 0; i < paths.size(); i++) {
             // The parser writes into its buffer, so each run gets a fresh copy
-            std::string buf = sources[i];
-            buf.append("\0\0", 2);
+            auto buf = bufferOf(sources[i]);
             auto path = state.rootPath(CanonPath(paths[i]));
             DocCommentMap docComments;
             try {
                 auto t0 = Clock::now();
                 Expr * e = parseExprFromBuf(
-                    buf.data(),
-                    buf.size(),
+                    BUF_ARGS(buf),
                     Pos::Origin(path),
                     path.parent(),
                     state.mem.exprs,

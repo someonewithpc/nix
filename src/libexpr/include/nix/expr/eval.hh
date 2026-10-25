@@ -230,6 +230,7 @@ std::ostream & operator<<(std::ostream & os, WhileTryingToUse w);
 
 struct RegexCache;
 struct ImportPrefetcher;
+class ParseBuffer;
 
 ref<RegexCache> makeRegexCache();
 
@@ -981,8 +982,7 @@ private:
     friend struct ExprLet;
 
     Expr * parse(
-        char * text,
-        size_t length,
+        ParseBuffer & text,
         Pos::Origin origin,
         const SourcePath & basePath,
         const std::shared_ptr<StaticEnv> & staticEnv);
@@ -1001,8 +1001,7 @@ private:
     friend struct ImportPrefetcher;
 
     ExprAttrs * parseReplBindings(
-        char * text,
-        size_t length,
+        ParseBuffer & text,
         Pos::Origin origin,
         const SourcePath & basePath,
         const std::shared_ptr<StaticEnv> & staticEnv);

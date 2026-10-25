@@ -5,6 +5,7 @@
 
 #include "nix/expr/nixexpr.hh"
 #include "nix/expr/eval-settings.hh"
+#include "nix/expr/parse-buffer.hh"
 
 namespace nix {
 
@@ -13,16 +14,14 @@ typedef boost::unordered_flat_map<PosIdx, DocComment, std::hash<PosIdx>> DocComm
 /**
  * Parse a Nix expression from a buffer
  *
- * `text` holds `length` bytes, the last two of which must be NUL; the
- * parser writes into the buffer
+ * The parser writes into the buffer
  *
  * With `imports` set, the paths of `import <path literal>` calls and the
  * `.nix` path literals in lists are added to it. With `quiet` set, the parse throws `ParseAbandoned`
  * instead of printing a warning
  */
 Expr * parseExprFromBuf(
-    char * text,
-    size_t length,
+    ParseBuffer & text,
     Pos::Origin origin,
     const SourcePath & basePath,
     Exprs & exprs,
@@ -40,8 +39,7 @@ Expr * parseExprFromBuf(
  * Returns ExprAttrs with bindings to add to scope
  */
 ExprAttrs * parseReplBindingsFromBuf(
-    char * text,
-    size_t length,
+    ParseBuffer & text,
     Pos::Origin origin,
     const SourcePath & basePath,
     Exprs & exprs,

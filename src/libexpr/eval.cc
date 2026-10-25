@@ -372,11 +372,9 @@ struct ImportPrefetcher
                     return;
                 i->second = f = std::make_shared<File>();
             }
-            auto buffer = resolved.resolveSymlinks().readFile();
-            buffer.append("\0\0", 2);
+            auto buffer = readParseBuffer(resolved.resolveSymlinks());
             f->e = parseExprFromBuf(
-                buffer.data(),
-                buffer.size(),
+                buffer,
                 Pos::Origin(resolved),
                 resolved.parent(),
                 state.mem.exprs,
@@ -3415,10 +3413,8 @@ Expr * EvalState::parseExprFromFile(const SourcePath & path, const std::shared_p
         if (auto e = importPrefetcher->take(path, docComments))
             return finishParse(e, Pos::Origin(path), docComments, staticEnv);
     }
-    auto buffer = path.resolveSymlinks().readFile();
-    // readFile hopefully have left some extra space for terminators
-    buffer.append("\0\0", 2);
-    return parse(buffer.data(), buffer.size(), Pos::Origin(path), path.parent(), staticEnv);
+    auto buffer = readParseBuffer(path.resolveSymlinks());
+    return parse(buffer, Pos::Origin(path), path.parent(), staticEnv);
 }
 
 Expr * EvalState::parseExprFromString(
@@ -3427,9 +3423,9 @@ Expr * EvalState::parseExprFromString(
     // NOTE this method (and parseStdin) must take care to *fully copy* their input
     // into their respective Pos::Origin until the parser stops overwriting its input
     // data.
-    auto s = make_ref<std::string>(s_);
-    s_.append("\0\0", 2);
-    return parse(s_.data(), s_.size(), Pos::String{.source = s}, basePath, staticEnv);
+    ParseBuffer buffer(s_);
+    auto s = make_ref<std::string>(std::move(s_));
+    return parse(buffer, Pos::String{.source = s}, basePath, staticEnv);
 }
 
 Expr * EvalState::parseExprFromString(std::string s, const SourcePath & basePath)
@@ -3447,9 +3443,8 @@ ExprAttrs * EvalState::parseReplBindings(
     std::string s_, std::string errorSource, const SourcePath & basePath, const std::shared_ptr<StaticEnv> & staticEnv)
 {
     auto s = make_ref<std::string>(std::move(errorSource));
-    // flex requires two NUL terminators for yy_scan_buffer
-    s_.append("\0\0", 2);
-    return parseReplBindings(s_.data(), s_.size(), Pos::String{.source = s}, basePath, staticEnv);
+    ParseBuffer buffer(s_);
+    return parseReplBindings(buffer, Pos::String{.source = s}, basePath, staticEnv);
 }
 
 Expr * EvalState::parseStdin()
@@ -3458,11 +3453,9 @@ Expr * EvalState::parseStdin()
     // input into their respective Pos::Origin until the parser stops overwriting its
     // input data.
     // Activity act(*logger, lvlTalkative, "parsing standard input");
-    auto buffer = drainFD(0);
-    // drainFD should have left some extra space for terminators
-    buffer.append("\0\0", 2);
-    auto s = make_ref<std::string>(buffer);
-    return parse(buffer.data(), buffer.size(), Pos::Stdin{.source = s}, rootPath("."), staticBaseEnv);
+    auto s = make_ref<std::string>(drainFD(0));
+    ParseBuffer buffer(*s);
+    return parse(buffer, Pos::Stdin{.source = s}, rootPath("."), staticBaseEnv);
 }
 
 SourcePath EvalState::findFile(const std::string_view path)
@@ -3589,8 +3582,7 @@ EvalState::resolveLookupPathPath(const LookupPath::Path & value0, bool initAcces
 }
 
 Expr * EvalState::parse(
-    char * text,
-    size_t length,
+    ParseBuffer & text,
     Pos::Origin origin,
     const SourcePath & basePath,
     const std::shared_ptr<StaticEnv> & staticEnv)
@@ -3600,7 +3592,6 @@ Expr * EvalState::parse(
     std::vector<SourcePath> imports;
     auto result = parseExprFromBuf(
         text,
-        length,
         origin,
         basePath,
         mem.exprs,
@@ -3633,8 +3624,7 @@ Expr * EvalState::finishParse(
 }
 
 ExprAttrs * EvalState::parseReplBindings(
-    char * text,
-    size_t length,
+    ParseBuffer & text,
     Pos::Origin origin,
     const SourcePath & basePath,
     const std::shared_ptr<StaticEnv> & staticEnv)
@@ -3642,7 +3632,7 @@ ExprAttrs * EvalState::parseReplBindings(
     auto tmpDocComments = make_ref<DocCommentMap>();
 
     auto bindings = parseReplBindingsFromBuf(
-        text, length, origin, basePath, mem.exprs, symbols, settings, positions, *tmpDocComments, rootFS);
+        text, origin, basePath, mem.exprs, symbols, settings, positions, *tmpDocComments, rootFS);
     assert(bindings);
 
     bindings->bindVars(*this, staticEnv);
