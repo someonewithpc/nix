@@ -202,6 +202,16 @@ class SymbolCache
 
 public:
     /**
+     * Free the entries; the next `start` makes new ones
+     */
+    void release()
+    {
+        entries = {};
+        used = 0;
+        serial = 0;
+    }
+
+    /**
      * Forget symbols from any other table
      */
     void start(const SymbolTable & symbols)
@@ -1866,6 +1876,9 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
                 r.ok = p.runBindsTo(unused, unusedAny, base + cuts[i + 1], &r.bindings) && p.t == base + cuts[i + 1];
             } catch (...) {
             }
+            /* A pool thread's cache only helps with this one set, and would
+               otherwise hold several MB for the life of the process */
+            symbolCache.release();
         },
         k - 1);
     st.deferredDocs = outerDocs;
