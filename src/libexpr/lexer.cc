@@ -19,13 +19,17 @@ namespace nix::lexer {
 
 namespace {
 
-/* Token vectors that were used before, biggest first */
+/* Token vectors that were used before, so that lexing the next file does
+   not fault in fresh pages. Only vectors of ordinary files are kept: the
+   one for a file of several MB is freed, since a file that big is mostly
+   parsed once, and keeping it held 63 MB for the rest of a NixOS eval */
 class TokenPool
 {
     std::mutex m;
     std::vector<std::vector<Token>> spare;
     size_t bytes = 0;
-    static constexpr size_t maxBytes = size_t(256) << 20;
+    static constexpr size_t maxKeep = size_t(4) << 20;
+    static constexpr size_t maxBytes = size_t(32) << 20;
 
 public:
     std::vector<Token> get(size_t want)
@@ -53,7 +57,7 @@ public:
     void put(std::vector<Token> && v)
     {
         size_t b = v.capacity() * sizeof(Token);
-        if (b < 4096)
+        if (b < 4096 || b > maxKeep)
             return;
         v.clear();
         std::lock_guard lock(m);
@@ -667,7 +671,9 @@ public:
 
     void reserve(uint32_t bytes)
     {
-        size_t want = bytes / 4 + 16;
+        /* Nix files have about one token per 8.5 bytes, and a vector that
+           is too small grows */
+        size_t want = bytes / 8 + 64;
         if (out.tokens.capacity() < want) {
             out.tokens = tokenPool.get(want);
             out.tokens.reserve(want);
