@@ -93,8 +93,8 @@ Results at the goto-parser commit (1fb393985) and the commit before it:
   counter while the first piece changed it. It is fixed, and the counter is
   gone with the goto parser. TSan was then clean on the corpus and on both
   evals
-- ASan+UBSan was clean before the goto parser. It has not been rerun on the
-  goto parser yet
+- ASan+UBSan is clean on the goto parser (beryllium, all eight `check.sh`
+  configurations, no reports)
 
 ## Measurements
 
@@ -127,10 +127,40 @@ Where the eval time goes:
   prefetch threads now. An io_uring loader would save less than that, so it
   has not been written
 
+### O3 and LTO on beryllium
+
+beryllium (32 cores), `build.sh o3` of the branch at d765c1914 and of its
+base 5533e016a, run back to back. The load average was around 17 from
+other work, so treat small differences as noise
+
+| | Bison | branch |
+|---|---|---|
+| corpus (5969 files), 1 thread, lex+parse | 0.86-0.88 s | 0.24 s |
+| corpus, bindVars | 0.066 s | 0.067 s |
+| corpus, 12 threads, lex+parse+bindVars | 0.45 s | 0.078 s |
+| hackage-packages.nix, lex+parse | 0.26 s | 0.024-0.028 s |
+| `hello.drvPath` eval (hyperfine) | 154 ms | 136 ms |
+| minimal NixOS toplevel eval | 3.67 s, 671 MB | 3.08 s, 820-830 MB |
+
+hackage-packages.nix against lexer and parser threads: 82 ms on 1, 37 ms
+on 4, 28 ms on 8, 26 ms on 12, 24 ms on 24
+
+The `nix` binaries that `build.sh` installs into `outputs/o3` and
+`outputs/asan` have the devshell's `outputs/out/lib` in their rpath, so
+they load the dev libraries unless `LD_LIBRARY_PATH` points at their own
+`lib`. The parse-bench builds are not affected
+
+Memory: each pool thread kept about 7 MB of caches and allocator heap,
+which with 24 threads added 120 MB to the NixOS eval for no speedup. The
+default is now at most 8 threads. What is left of the extra memory is
+about 35 MB for prefetching, about 60 MB for 8 pool threads, and about 65
+MB that is there even with 2 threads and no prefetching. That last part
+has not been tracked down
+
 ## Left to do
 
-- Rerun ASan+UBSan on the goto parser
-- O3+LTO numbers (`build.sh o3` in this worktree and in a master checkout)
+- Find the 65 MB the branch uses over Bison in a NixOS eval with
+  prefetching and pool threads off
 - Time the goto parser against the recursive one on a quiet machine
 - The io_uring loader with a huge-page buffer, if it is still wanted given
   the numbers above

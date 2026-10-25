@@ -1,4 +1,4 @@
-# nix eval --raw --impure --file nixos.nix --arg nixpkgs <path>: a minimal
+# nix eval --raw --impure --expr "import ./nixos.nix { nixpkgs = <path>; }": a minimal
 # NixOS system, which imports a few thousand modules
 { nixpkgs }:
 (import "${nixpkgs}/nixos/lib/eval-config.nix" {
