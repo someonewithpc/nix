@@ -934,11 +934,24 @@ struct StaticEnv
         vars.reserve(expectedSize);
     };
 
-    void sort()
+    /* Out of line, so that its locals stay out of the frames of the
+       recursive bindVars */
+    [[gnu::noinline]] void sort()
     {
-        std::stable_sort(vars.begin(), vars.end(), [](const Vars::value_type & a, const Vars::value_type & b) {
-            return a.first < b.first;
-        });
+        auto less = [](const Vars::value_type & a, const Vars::value_type & b) { return a.first < b.first; };
+        /* Small and nearly sorted, as a lambda's formals are: an insertion
+           sort is stable too, and needs no buffer */
+        if (vars.size() > 32) {
+            std::stable_sort(vars.begin(), vars.end(), less);
+            return;
+        }
+        for (size_t i = 1; i < vars.size(); i++) {
+            auto v = vars[i];
+            size_t j = i;
+            for (; j > 0 && less(v, vars[j - 1]); j--)
+                vars[j] = vars[j - 1];
+            vars[j] = v;
+        }
     }
 
     void deduplicate()
