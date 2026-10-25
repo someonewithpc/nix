@@ -1,5 +1,7 @@
 #include "lexer-simd.hh"
 
+#include <bit>
+
 #if defined(__x86_64__) || defined(__i386__)
 #  include <immintrin.h>
 #  define NIX_LEXER_X86 1
@@ -66,6 +68,14 @@ void classify(const unsigned char * block, Masks & out)
     classifyWith<V>(block, out);
 }
 
+size_t findEscape(const char * p, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (p[i] == '\\' || p[i] == '\r' || p[i] == '\0')
+            return i;
+    return n;
+}
+
 } // namespace scalar
 
 #ifdef NIX_LEXER_X86
@@ -115,6 +125,11 @@ struct V
 void classify(const unsigned char * block, Masks & out)
 {
     classifyWith<V>(block, out);
+}
+
+size_t findEscape(const char * p, size_t n)
+{
+    return findEscapeWith<V>(p, n, scalar::findEscape);
 }
 
 } // namespace sse2
@@ -170,6 +185,11 @@ struct V
 void classify(const unsigned char * block, Masks & out)
 {
     classifyWith<V>(block, out);
+}
+
+size_t findEscape(const char * p, size_t n)
+{
+    return findEscapeWith<V>(p, n, scalar::findEscape);
 }
 
 } // namespace avx2
@@ -247,6 +267,25 @@ void classify(const unsigned char * block, Masks & out)
     out.star = bit(BStar);
 }
 
+/* The tail is a masked load, which does not fault on the bytes it leaves
+   out, so there is no scalar loop */
+size_t findEscape(const char * p, size_t n)
+{
+    const __m512i backslash = _mm512_set1_epi8('\\');
+    const __m512i cr = _mm512_set1_epi8('\r');
+    for (size_t i = 0; i < n; i += 64) {
+        size_t left = n - i;
+        __mmask64 valid = left >= 64 ? ~__mmask64(0) : (__mmask64(1) << left) - 1;
+        __m512i x = _mm512_maskz_loadu_epi8(valid, p + i);
+        __mmask64 m = (_mm512_cmpeq_epi8_mask(x, backslash) | _mm512_cmpeq_epi8_mask(x, cr)
+                       | _mm512_testn_epi8_mask(x, x))
+                      & valid;
+        if (m)
+            return i + std::countr_zero(m);
+    }
+    return n;
+}
+
 #  if defined(__clang__)
 #    pragma clang attribute pop
 #  else
@@ -316,6 +355,11 @@ void classify(const unsigned char * block, Masks & out)
     classifyWith<V>(block, out);
 }
 
+size_t findEscape(const char * p, size_t n)
+{
+    return findEscapeWith<V>(p, n, scalar::findEscape);
+}
+
 } // namespace neon
 
 #endif
@@ -333,6 +377,36 @@ Classifier pickClassifier()
 #else
     return scalar::classify;
 #endif
+}
+
+EscapeFinder pickEscapeFinder()
+{
+#ifdef NIX_LEXER_X86
+    if (avx512::supported())
+        return avx512::findEscape;
+    if (__builtin_cpu_supports("avx2"))
+        return avx2::findEscape;
+    return sse2::findEscape;
+#elif defined(NIX_LEXER_NEON)
+    return neon::findEscape;
+#else
+    return scalar::findEscape;
+#endif
+}
+
+std::vector<std::pair<const char *, EscapeFinder>> allEscapeFinders()
+{
+    std::vector<std::pair<const char *, EscapeFinder>> all{{"scalar", scalar::findEscape}};
+#ifdef NIX_LEXER_X86
+    all.emplace_back("sse2", sse2::findEscape);
+    if (__builtin_cpu_supports("avx2"))
+        all.emplace_back("avx2", avx2::findEscape);
+    if (avx512::supported())
+        all.emplace_back("avx512", avx512::findEscape);
+#elif defined(NIX_LEXER_NEON)
+    all.emplace_back("neon", neon::findEscape);
+#endif
+    return all;
 }
 
 std::vector<std::pair<const char *, Classifier>> allClassifiers()

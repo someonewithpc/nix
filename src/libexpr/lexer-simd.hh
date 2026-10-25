@@ -8,6 +8,7 @@
  * adding one such backend and listing it in `pickClassifier`
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -40,9 +41,25 @@ struct Masks
 using Classifier = void (*)(const unsigned char * block, Masks & out);
 
 /**
+ * The offset of the first `\\`, `\r` or NUL in the `n` bytes at `p`, or
+ * `n`: the bytes a string body cannot be copied over unchanged
+ */
+using EscapeFinder = size_t (*)(const char * p, size_t n);
+
+/**
  * The best classifier for this CPU
  */
 Classifier pickClassifier();
+
+/**
+ * The best escape finder for this CPU
+ */
+EscapeFinder pickEscapeFinder();
+
+/**
+ * Every escape finder this build has and this CPU can run, scalar first
+ */
+std::vector<std::pair<const char *, EscapeFinder>> allEscapeFinders();
 
 /**
  * Every classifier this build has and this CPU can run, scalar first, for

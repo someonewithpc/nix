@@ -40,4 +40,17 @@ inline void classifyWith(const unsigned char * block, Masks & out)
     }
 }
 
+template<class V>
+inline size_t findEscapeWith(const char * p, size_t n, size_t (*tail)(const char *, size_t))
+{
+    size_t i = 0;
+    for (; i + V::width <= n; i += V::width) {
+        V x = V::load(reinterpret_cast<const unsigned char *>(p + i));
+        uint64_t m = V::mask(V::or_(V::or_(V::eq(x, '\\'), V::eq(x, '\r')), V::eq(x, 0)));
+        if (m)
+            return i + std::countr_zero(m);
+    }
+    return i + tail(p + i, n - i);
+}
+
 // NOLINTEND(llvm-header-guard)

@@ -33,6 +33,31 @@ int main()
         printf("%s ", name);
     printf("agree on 2000000 random blocks\n");
 
+    /* Every length up to 300 at every alignment, with a special byte at
+       every place or none */
+    auto finders = allEscapeFinders();
+    std::vector<char> text(400 + 64);
+    for (size_t len = 0; len <= 300; len++)
+        for (size_t off = 0; off < 64; off += 7)
+            for (size_t at = 0; at <= len; at++)
+                for (char special : {'\\', '\r', '\0'}) {
+                    for (auto & c : text)
+                        c = interesting[rng() % 26] == '\\' ? 'x' : 'a' + rng() % 26;
+                    if (at < len)
+                        text[off + at] = special;
+                    size_t ref = finders[0].second(text.data() + off, len);
+                    for (size_t i = 1; i < finders.size(); i++)
+                        if (finders[i].second(text.data() + off, len) != ref) {
+                            printf("%s escape finder differs at len %zu off %zu at %zu\n", finders[i].first, len, off, at);
+                            return 1;
+                        }
+                    if (at == len)
+                        break;
+                }
+    for (auto & [name, _] : finders)
+        printf("%s ", name);
+    printf("escape finders agree\n");
+
     /* 64 MiB of source-like bytes, classified block by block */
     std::vector<unsigned char> buf(64 << 20);
     for (auto & b : buf)
