@@ -150,6 +150,10 @@ struct LexerState
     PosIdx at(const ParserLocation & loc);
 };
 
+struct ParseAbandoned
+{
+};
+
 struct ParserState
 {
     const LexerState & lexerState;
@@ -162,6 +166,12 @@ struct ParserState
     const ref<SourceAccessor> rootFS;
     static constexpr Expr::AstSymbols s = StaticEvalSymbols::create().exprSymbols;
     const EvalSettings & settings;
+    /* Where `addAttr` puts the doc comments it would add to the lexer's
+       map, while other threads may read that map */
+    std::vector<std::pair<PosIdx, DocComment>> * deferredDocs = nullptr;
+    /* Parsing ahead of time: rather than warn, throw `ParseAbandoned`, so
+       that a parse in the right order warns instead */
+    bool quiet = false;
 
     void dupAttr(const AttrSelectionPath & attrPath, const PosIdx pos, const PosIdx prevPos);
     void dupAttr(Symbol attr, const PosIdx pos, const PosIdx prevPos);
@@ -236,7 +246,10 @@ inline void ParserState::addAttr(
     auto it = lexerState.positionToDocComment.find(pos);
     if (it != lexerState.positionToDocComment.end()) {
         e->setDocComment(it->second);
-        lexerState.positionToDocComment.emplace(at(exprLoc), it->second);
+        if (deferredDocs)
+            deferredDocs->emplace_back(at(exprLoc), it->second);
+        else
+            lexerState.positionToDocComment.emplace(at(exprLoc), it->second);
     }
 }
 

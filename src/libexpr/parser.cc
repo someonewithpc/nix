@@ -9,14 +9,19 @@
 #include "nix/expr/diagnose.hh"
 #include "nix/expr/eval.hh"
 #include "nix/expr/parser-state.hh"
+#include "work-pool.hh"
 #include "nix/util/finally.hh"
 #include "nix/util/users.hh"
 #include "nix/util/util.hh"
 
 #include "lexer.hh"
 
+#include <algorithm>
 #include <bit>
 #include <cstring>
+#include <exception>
+#include <optional>
+#include <thread>
 
 namespace nix {
 
@@ -200,6 +205,27 @@ public:
 
 thread_local SymbolCache symbolCache;
 
+/* Attribute sets of at least twice this many tokens are parsed in pieces
+   on several threads */
+size_t minPiece()
+{
+    static const size_t v = [] {
+        auto e = getenv("NIX_PARSER_MIN_PIECE");
+        return e ? size_t(std::stoul(e)) : size_t(1) << 16;
+    }();
+    return v;
+}
+
+unsigned maxPieces()
+{
+    static const unsigned v = [] {
+        if (auto e = getenv("NIX_PARSER_THREADS"))
+            return unsigned(std::stoul(e));
+        return std::max(1u, std::thread::hardware_concurrency() * 3 / 4);
+    }();
+    return v;
+}
+
 /* Nesting the parser handles before giving up instead of running out of
    stack */
 constexpr unsigned maxDepth = 20000;
@@ -212,6 +238,13 @@ class Parser
     const Tokens & tk;
     const Token * t;
     unsigned depth = 0;
+
+    /* The `{` and `}` of the attribute sets big enough to parse in
+       pieces, by `{` */
+    std::vector<std::pair<uint32_t, uint32_t>> bigSets;
+    /* Parsing a piece of a big attribute set, which must not start
+       parsing pieces itself */
+    bool inPiece = false;
 
     PosIdx at(uint32_t offset)
     {
@@ -348,6 +381,25 @@ class Parser
             lambda->setDocComment(it->second);
     }
 
+    void warnIfCursedOr(Expr * e)
+    {
+        if (!st.quiet)
+            e->warnIfCursedOr(st.symbols, st.positions);
+        else if (auto call = dynamic_cast<ExprCall *>(e); call && call->cursedOrEndPos)
+            throw ParseAbandoned();
+    }
+
+    template<typename F>
+    void lint(const Setting<Diagnose> & setting, const F & mkError)
+    {
+        if (st.quiet && setting.get() == Diagnose::Warn) {
+            if (mkError(false))
+                throw ParseAbandoned();
+            return;
+        }
+        diagnose(setting, mkError);
+    }
+
     Expr * makeCall(PosIdx pos, Expr * fn, Expr * arg)
     {
         if (auto e2 = dynamic_cast<ExprCall *>(fn)) {
@@ -401,8 +453,32 @@ class Parser
         Repl,
     };
 
+    struct Inherit
+    {
+        Expr * from = nullptr;
+        uint32_t fromBegin = 0;
+        std::vector<std::pair<AttrName, PosIdx>> names;
+    };
+
+    /* A binding of a piece, to be added to the attribute set once the
+       piece is known to be right */
+    struct Binding
+    {
+        std::vector<AttrName> path;
+        uint32_t begin = 0;
+        E e{};
+        std::optional<Inherit> inherit;
+    };
+
     ExprAttrs * parseBinds(BindsContext ctx);
-    void parseInherit(ExprAttrs * attrs);
+    /* Parse bindings into `attrs`, or into `record` when it is set, until
+       `t` reaches `limit`; false at the first token that starts no
+       binding */
+    bool parseBindsTo(ExprAttrs *& attrs, bool & any, const Token * limit, std::vector<Binding> * record);
+    bool parseBindsInPieces(ExprAttrs *& attrs, bool & any);
+    Inherit parseInherit();
+    void addInherit(ExprAttrs * attrs, Inherit && inherit);
+    void findBigSets();
 
 public:
     Parser(ParserState & st, LexerState & ls, char * text, const Tokens & tk)
@@ -420,6 +496,8 @@ public:
 
 Expr * Parser::parseStart(bool repl)
 {
+    if (tk.tokens.size() >= 2 * minPiece() && maxPieces() > 1)
+        findBigSets();
     if (repl && kind() == REPL_BINDINGS) {
         next();
         auto attrs = parseBinds(Repl);
@@ -741,7 +819,7 @@ E Parser::parseExprApp()
     while (simpleStarts[kind()]) {
         auto arg = parseExprSelect();
         acc = makeCall(at(first.begin), acc, arg.e);
-        arg.e->warnIfCursedOr(st.symbols, st.positions);
+        warnIfCursedOr(arg.e);
     }
     return {acc, first.begin};
 }
@@ -757,7 +835,7 @@ E Parser::parseExprSelect()
             next();
             auto def = parseExprSelect();
             auto e = st.exprs.add<ExprSelect>(st.exprs.alloc, at(s.begin), s.e, path, def.e);
-            def.e->warnIfCursedOr(st.symbols, st.positions);
+            warnIfCursedOr(def.e);
             return {e, s.begin};
         }
         return {st.exprs.add<ExprSelect>(st.exprs.alloc, at(s.begin), s.e, path, nullptr), s.begin};
@@ -855,7 +933,7 @@ Expr * Parser::parsePathStart(const Token & tok)
         if (st.settings.pureEval) {
             throw Error("the path '%s' can not be resolved in pure mode", literal);
         }
-        diagnose(st.settings.lintAbsolutePathLiterals, [&](bool) -> std::optional<ParseError> {
+        lint(st.settings.lintAbsolutePathLiterals, [&](bool) -> std::optional<ParseError> {
             return ParseError(
                 {.msg = HintFmt(
                      "home path literals are not portable. Consider replacing path literal '%s' by a string, relative path, or parameter",
@@ -869,7 +947,7 @@ Expr * Parser::parsePathStart(const Token & tok)
     }
 
     if (literal.front() == '/') {
-        diagnose(st.settings.lintAbsolutePathLiterals, [&](bool) -> std::optional<ParseError> {
+        lint(st.settings.lintAbsolutePathLiterals, [&](bool) -> std::optional<ParseError> {
             return ParseError(
                 {.msg = HintFmt(
                      "absolute path literals are not portable. Consider replacing path literal '%s' by a string, relative path, or parameter",
@@ -888,7 +966,7 @@ Expr * Parser::parsePathStart(const Token & tok)
     }
 
     /* check for short path literals */
-    diagnose(st.settings.lintShortPathLiterals, [&](bool) -> std::optional<ParseError> {
+    lint(st.settings.lintShortPathLiterals, [&](bool) -> std::optional<ParseError> {
         if (literal.front() != '.')
             return ParseError(
                 {.msg = HintFmt(
@@ -977,7 +1055,7 @@ E Parser::parseSimple()
     case URI: {
         next();
         auto s = raw(tok);
-        diagnose(st.settings.lintUrlLiterals, [&](bool fatal) -> std::optional<ParseError> {
+        lint(st.settings.lintUrlLiterals, [&](bool fatal) -> std::optional<ParseError> {
             return ParseError(
                 {.msg = HintFmt(
                      "URL literals are %s. Consider using a string literal \"%s\" instead",
@@ -1028,7 +1106,7 @@ E Parser::parseSimple()
         while (simpleStarts[kind()]) {
             auto e = parseExprSelect();
             list.push_back(e.e);
-            e.e->warnIfCursedOr(st.symbols, st.positions);
+            warnIfCursedOr(e.e);
         }
         expect(RBRACKET, {});
         return {ex.add<ExprList>(ex.alloc, list), tok.begin};
@@ -1043,35 +1121,11 @@ ExprAttrs * Parser::parseBinds(BindsContext ctx)
     ExprAttrs * attrs = nullptr;
     bool any = false;
 
-    while (true) {
-        auto & tok = peek();
-        switch (+tok.kind) {
-        case ID:
-        case OR_KW:
-        case QUOTE:
-        case DOLLAR_CURLY: {
-            auto path = parseAttrPath();
-            expect(ASSIGN, {DOT, ASSIGN});
-            auto e = parseExpr();
-            expect(SEMICOLON, {SEMICOLON});
-            if (!attrs)
-                attrs = st.exprs.add<ExprAttrs>();
-            st.addAttr(attrs, std::move(path), ParserLocation{int(tok.begin), 0, 0, 0}, e.e, ParserLocation{int(e.begin), 0, 0, 0});
-            any = true;
-            continue;
-        }
-        case INHERIT:
-            next();
-            if (!attrs)
-                attrs = st.exprs.add<ExprAttrs>();
-            parseInherit(attrs);
-            any = true;
-            continue;
-        default:
-            break;
-        }
-        break;
-    }
+    bool more = true;
+    if (ctx == Braces || ctx == RecBraces)
+        more = parseBindsInPieces(attrs, any);
+    if (more)
+        parseBindsTo(attrs, any, nullptr, nullptr);
 
     if (!any) {
         switch (+ctx) {
@@ -1088,19 +1142,231 @@ ExprAttrs * Parser::parseBinds(BindsContext ctx)
     return attrs;
 }
 
-void Parser::parseInherit(ExprAttrs * attrs)
+bool Parser::parseBindsTo(ExprAttrs *& attrs, bool & any, const Token * limit, std::vector<Binding> * record)
 {
-    Expr * from = nullptr;
-    uint32_t fromBegin = 0;
+    while (!limit || t < limit) {
+        auto & tok = peek();
+        switch (+tok.kind) {
+        case ID:
+        case OR_KW:
+        case QUOTE:
+        case DOLLAR_CURLY: {
+            auto path = parseAttrPath();
+            expect(ASSIGN, {DOT, ASSIGN});
+            auto e = parseExpr();
+            expect(SEMICOLON, {SEMICOLON});
+            if (record)
+                record->push_back(Binding{.path = std::move(path), .begin = tok.begin, .e = e});
+            else {
+                if (!attrs)
+                    attrs = st.exprs.add<ExprAttrs>();
+                st.addAttr(
+                    attrs,
+                    std::move(path),
+                    ParserLocation{int(tok.begin), 0, 0, 0},
+                    e.e,
+                    ParserLocation{int(e.begin), 0, 0, 0});
+            }
+            any = true;
+            continue;
+        }
+        case INHERIT: {
+            next();
+            auto inherit = parseInherit();
+            if (record)
+                record->push_back(Binding{.inherit = std::move(inherit)});
+            else {
+                if (!attrs)
+                    attrs = st.exprs.add<ExprAttrs>();
+                addInherit(attrs, std::move(inherit));
+            }
+            any = true;
+            continue;
+        }
+        default:
+            return false;
+        }
+    }
+    return true;
+}
+
+void Parser::findBigSets()
+{
+    std::vector<uint32_t> open;
+    auto & ts = tk.tokens;
+    for (uint32_t i = 0; i < ts.size(); i++)
+        switch (+ts[i].kind) {
+        case LBRACE:
+        case DOLLAR_CURLY:
+            open.push_back(i);
+            break;
+        case RBRACE:
+            if (open.empty())
+                break;
+            if (i - open.back() >= 2 * minPiece() && ts[open.back()].kind == LBRACE)
+                bigSets.emplace_back(open.back(), i);
+            open.pop_back();
+            break;
+        default:
+            break;
+        }
+    std::sort(bigSets.begin(), bigSets.end());
+}
+
+/* Cut a big attribute set at bindings that look like they are its own,
+   parse every piece after the first at once on its own thread, and take a
+   piece only when the bindings before it end exactly where it starts. A
+   piece that starts anywhere else, or that fails, is parsed again, so the
+   result and the first error are the ones of a serial parse */
+bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
+{
+    if (inPiece || bigSets.empty())
+        return true;
+    uint32_t open = t - tk.tokens.data() - 1;
+    auto big = std::lower_bound(bigSets.begin(), bigSets.end(), std::pair{open, uint32_t(0)});
+    if (big == bigSets.end() || big->first != open)
+        return true;
+    uint32_t close = big->second;
+    auto & ts = tk.tokens;
+
+    unsigned pieces = std::min<size_t>(maxPieces(), (close - open) / minPiece());
+    std::vector<uint32_t> cuts{open + 1};
+    int nest = 0;
+    for (uint32_t i = open + 1; i < close && cuts.size() < pieces; i++) {
+        switch (+ts[i].kind) {
+        case LBRACE:
+        case DOLLAR_CURLY:
+        case LPAREN:
+        case LBRACKET:
+        case LET:
+            nest++;
+            continue;
+        case RBRACE:
+        case RPAREN:
+        case RBRACKET:
+        case IN_KW:
+            nest--;
+            continue;
+        case SEMICOLON:
+            break;
+        default:
+            continue;
+        }
+        if (nest != 0 || i + 2 >= close)
+            continue;
+        auto k = ts[i + 1].kind;
+        auto k2 = ts[i + 2].kind;
+        if (!((k == ID && (k2 == ASSIGN || k2 == DOT)) || k == QUOTE || k == INHERIT))
+            continue;
+        if (i + 1 >= open + uint64_t(close - open) * cuts.size() / pieces)
+            cuts.push_back(i + 1);
+    }
+    if (cuts.size() < 2)
+        return true;
+    cuts.push_back(close);
+    size_t k = cuts.size() - 1;
+
+    struct Piece
+    {
+        std::vector<Binding> bindings;
+        std::vector<std::pair<PosIdx, DocComment>> docs;
+        bool ok = false;
+    };
+
+    std::vector<Piece> results(k);
+    std::exception_ptr error;
+    bool more = true;
+    auto base = tk.tokens.data();
+    /* Doc comments go to the outer set's pieces when this set is in one */
+    auto outerDocs = st.deferredDocs;
+    auto addDocs = [&](std::vector<std::pair<PosIdx, DocComment>> & docs) {
+        if (outerDocs)
+            outerDocs->insert(outerDocs->end(), docs.begin(), docs.end());
+        else
+            for (auto & [pos, doc] : docs)
+                ls.positionToDocComment.emplace(pos, doc);
+    };
+    std::vector<std::pair<PosIdx, DocComment>> docs;
+    st.deferredDocs = &docs;
+    /* The first piece changes it meanwhile */
+    unsigned startDepth = depth;
+    bool ran = WorkPool::shared().tryRun(
+        k,
+        [&](size_t i) {
+            if (i == 0) {
+                try {
+                    more = parseBindsTo(attrs, any, base + cuts[1], nullptr);
+                } catch (...) {
+                    error = std::current_exception();
+                }
+                return;
+            }
+            auto & r = results[i];
+            try {
+                ParserState pst = st;
+                pst.deferredDocs = &r.docs;
+                pst.quiet = true;
+                Parser p(pst, ls, text, tk);
+                p.t = base + cuts[i];
+                p.depth = startDepth;
+                p.inPiece = true;
+                ExprAttrs * unused = nullptr;
+                bool unusedAny = false;
+                r.ok = p.parseBindsTo(unused, unusedAny, base + cuts[i + 1], &r.bindings) && p.t == base + cuts[i + 1];
+            } catch (...) {
+            }
+        },
+        k - 1);
+    st.deferredDocs = outerDocs;
+    if (!ran)
+        return true;
+    if (error)
+        std::rethrow_exception(error);
+    addDocs(docs);
+
+    for (size_t i = 1; i < k && more; i++) {
+        if (t < base + cuts[i])
+            more = parseBindsTo(attrs, any, base + cuts[i], nullptr);
+        if (!more)
+            break;
+        auto & r = results[i];
+        if (t != base + cuts[i] || !r.ok) {
+            if (t < base + cuts[i + 1])
+                more = parseBindsTo(attrs, any, base + cuts[i + 1], nullptr);
+            continue;
+        }
+        addDocs(r.docs);
+        if (!attrs && !r.bindings.empty())
+            attrs = st.exprs.add<ExprAttrs>();
+        for (auto & b : r.bindings) {
+            if (b.inherit)
+                addInherit(attrs, std::move(*b.inherit));
+            else
+                st.addAttr(
+                    attrs,
+                    std::move(b.path),
+                    ParserLocation{int(b.begin), 0, 0, 0},
+                    b.e.e,
+                    ParserLocation{int(b.e.begin), 0, 0, 0});
+            any = true;
+        }
+        t = base + cuts[i + 1];
+    }
+    return more;
+}
+
+Parser::Inherit Parser::parseInherit()
+{
+    Inherit r;
     if (kind() == LPAREN) {
         next();
         auto e = parseExpr();
         expect(RPAREN, {RPAREN});
-        from = e.e;
-        fromBegin = e.begin;
+        r.from = e.e;
+        r.fromBegin = e.begin;
     }
 
-    std::vector<std::pair<AttrName, PosIdx>> names;
+    auto & names = r.names;
     while (true) {
         auto & tok = peek();
         if (tok.kind == ID) {
@@ -1132,9 +1398,13 @@ void Parser::parseInherit(ExprAttrs * attrs)
             break;
     }
     expect(SEMICOLON, {});
+    return r;
+}
 
-    if (!from) {
-        for (auto & [i, iPos] : names) {
+void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
+{
+    if (!inherit.from) {
+        for (auto & [i, iPos] : inherit.names) {
             if (attrs->attrs->find(i.symbol) != attrs->attrs->end())
                 st.dupAttr(i.symbol, iPos, (*attrs->attrs)[i.symbol].pos);
             attrs->attrs->emplace(
@@ -1146,9 +1416,9 @@ void Parser::parseInherit(ExprAttrs * attrs)
 
     if (!attrs->inheritFromExprs)
         attrs->inheritFromExprs = std::make_unique<std::pmr::vector<Expr *>>();
-    attrs->inheritFromExprs->push_back(from);
-    auto fromExpr = st.exprs.add<ExprInheritFrom>(at(fromBegin), attrs->inheritFromExprs->size() - 1);
-    for (auto & [i, iPos] : names) {
+    attrs->inheritFromExprs->push_back(inherit.from);
+    auto fromExpr = st.exprs.add<ExprInheritFrom>(at(inherit.fromBegin), attrs->inheritFromExprs->size() - 1);
+    for (auto & [i, iPos] : inherit.names) {
         if (attrs->attrs->find(i.symbol) != attrs->attrs->end())
             st.dupAttr(i.symbol, iPos, (*attrs->attrs)[i.symbol].pos);
         attrs->attrs->emplace(

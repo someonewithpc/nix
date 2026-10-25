@@ -9,7 +9,8 @@
 
 namespace nix {
 
-/* Threads that lex the chunks of big files, kept between files */
+/* Threads that lex the chunks of big files and parse the pieces of big
+   attribute sets, kept between files */
 class WorkPool
 {
     std::mutex busy;
@@ -46,13 +47,18 @@ public:
        `fn(0)`, and wait for all of them. `fn` must not throw */
     void run(size_t count, std::function<void(size_t)> fn, size_t threadCount)
     {
-        /* Another thread has the pool: do this alone */
-        std::unique_lock busyLock(busy, std::try_to_lock);
-        if (!busyLock) {
+        if (!tryRun(count, fn, threadCount))
             for (size_t i = 0; i < count; i++)
                 fn(i);
-            return;
-        }
+    }
+
+    /* Like `run`, but false without running anything when another thread
+       has the pool */
+    bool tryRun(size_t count, std::function<void(size_t)> fn, size_t threadCount)
+    {
+        std::unique_lock busyLock(busy, std::try_to_lock);
+        if (!busyLock)
+            return false;
         std::unique_lock lock(m);
         while (threads.size() < threadCount)
             threads.emplace_back([this] { work(); }).detach();
@@ -65,6 +71,7 @@ public:
         lock.lock();
         finished.wait(lock, [&] { return next >= total && running == 0; });
         total = 0;
+        return true;
     }
 };
 
