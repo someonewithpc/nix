@@ -423,8 +423,15 @@ class Parser
             lambda->setDocComment(it->second);
     }
 
+    /* Whether this parse made a call with `or` as its argument. Until it
+       does, nothing can carry a cursed `or`, and the virtual calls that look
+       for one are skipped */
+    bool anyCursedOr = false;
+
     void warnIfCursedOr(Expr * e)
     {
+        if (!anyCursedOr)
+            return;
         if (!st.quiet)
             e->warnIfCursedOr(st.symbols, st.positions);
         else if (auto call = dynamic_cast<ExprCall *>(e); call && call->cursedOrEndPos)
@@ -994,7 +1001,8 @@ ret: {
         goto opLoop;
     }
     case KAppFirst:
-        r.e->resetCursedOr();
+        if (anyCursedOr)
+            r.e->resetCursedOr();
         f.a = r;
         f.b = r;
         goto appLoop;
@@ -1003,7 +1011,11 @@ ret: {
             if (auto var = dynamic_cast<ExprVar *>(f.b.e); var && var->name == sImport)
                 if (auto path = dynamic_cast<ExprPath *>(r.e))
                     st.imports->push_back(path->v.path());
-        f.b.e = makeCall(at(f.a.begin), f.b.e, r.e);
+        /* Past the first argument `f.b` is the call this built */
+        if (f.b.e != f.a.e)
+            static_cast<ExprCall *>(f.b.e)->args->push_back(r.e);
+        else
+            f.b.e = makeCall(at(f.a.begin), f.b.e, r.e);
         warnIfCursedOr(r.e);
         goto appLoop;
     case KSelSimple: {
@@ -1020,6 +1032,7 @@ ret: {
                 ex.add<ExprCall>(
                     at(r.begin), r.e, {ex.add<ExprVar>(at(r.begin), st.s.or_)}, st.positions.add(st.origin, tok.end)),
                 r.begin};
+            anyCursedOr = true;
         }
         frames.pop_back();
         goto ret;
