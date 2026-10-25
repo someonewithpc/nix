@@ -631,7 +631,15 @@ private:
     /* The common tokens, inlined into the loop of `runTo` */
     [[gnu::always_inline]] bool lexDefault(uint32_t & p);
     /* The rest, which need the longest-match machinery and a big frame */
-    [[gnu::noinline]] bool lexDefaultSlow(uint32_t & p, unsigned char c);
+    bool lexDefaultSlow(uint32_t & p, unsigned char c);
+    /* `lexDefaultSlow` with the position by value, so that the loop's
+       position never has to leave its register; the new position is in
+       the low half and whether to go on in bit 32 */
+    [[gnu::noinline]] uint64_t lexDefaultSlowAt(uint32_t p, unsigned char c)
+    {
+        bool more = lexDefaultSlow(p, c);
+        return p | uint64_t(more) << 32;
+    }
     bool lexString(uint32_t & p);
     bool lexIndString(uint32_t & p);
     bool lexInPath(uint32_t & p);
@@ -804,10 +812,12 @@ inline bool Lexer::lexDefault(uint32_t & p)
         break;
     }
 
-    return lexDefaultSlow(p, c);
+    uint64_t r = lexDefaultSlowAt(p, c);
+    p = uint32_t(r);
+    return r >> 32;
 }
 
-bool Lexer::lexDefaultSlow(uint32_t & p, unsigned char c)
+inline bool Lexer::lexDefaultSlow(uint32_t & p, unsigned char c)
 {
     Match m;
 
@@ -1228,9 +1238,16 @@ bool Lexer::runTo(uint32_t limit)
         bool more;
         switch (+state) {
         case Initial:
-        case Default:
-            more = lexDefault(pos);
+        case Default: {
+            /* Token after token for as long as the state stays a default
+               one and nothing above needs to look */
+            uint32_t p = pos;
+            do
+                more = lexDefault(p);
+            while (more && p < stopAt && (state == Default || state == Initial));
+            pos = p;
             break;
+        }
         case String:
             more = lexString(pos);
             break;
