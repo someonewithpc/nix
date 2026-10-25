@@ -739,6 +739,47 @@ bool Lexer::lexDefault(uint32_t & p)
         return true;
     }
 
+    /* The commonest punctuation, where no longer rule can match */
+    switch (+c) {
+    case '{':
+        adjust(1);
+        push(Default);
+        emit(LBRACE);
+        p++;
+        return true;
+    case '}':
+        adjust(1);
+        if (state != Initial)
+            pop();
+        emit(RBRACE);
+        p++;
+        return true;
+    case '"':
+        adjust(1);
+        push(String);
+        emit(QUOTE);
+        p++;
+        return true;
+    case '=':
+        if (s[p + 1] == '=')
+            break;
+        adjust(1);
+        emit(ASSIGN);
+        p++;
+        return true;
+    case '.':
+        /* `...`, a float, or a path, which needs a `/` where the path
+           characters end */
+        if (s[p + 1] == '.' || is(s[p + 1], Digit) || s[scan<false>(p, &simd::Masks::path)] == '/')
+            break;
+        adjust(1);
+        emit(DOT);
+        p++;
+        return true;
+    default:
+        break;
+    }
+
     switch (+c) {
     case '#': {
         uint32_t q = scan<true>(p + 1, &simd::Masks::newline);
