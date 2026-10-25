@@ -1,6 +1,8 @@
 #pragma once
 ///@file
 
+#include <algorithm>
+#include <cstring>
 #include <limits>
 
 #include "nix/expr/eval.hh"
@@ -359,23 +361,35 @@ ParserState::stripIndentation(const PosIdx pos, std::span<std::pair<PosIdx, std:
             }
             continue;
         }
-        for (size_t j = 0; j < str->l; ++j) {
+        /* A run of spaces or a whole line at a time */
+        const char * c = str->p;
+        const char * e = str->p + str->l;
+        while (c < e) {
             if (atStartOfLine) {
-                if (str->p[j] == ' ')
-                    curIndent++;
-                else if (str->p[j] == '\n') {
+                const char * t = c;
+                while (t < e && *t == ' ')
+                    t++;
+                curIndent += t - c;
+                c = t;
+                if (c == e)
+                    break;
+                if (*c == '\n') {
                     /* Empty line, doesn't influence minimum
                        indentation. */
                     curIndent = 0;
-                } else {
-                    atStartOfLine = false;
-                    if (curIndent < minIndent)
-                        minIndent = curIndent;
+                    c++;
+                    continue;
                 }
-            } else if (str->p[j] == '\n') {
-                atStartOfLine = true;
-                curIndent = 0;
+                atStartOfLine = false;
+                if (curIndent < minIndent)
+                    minIndent = curIndent;
             }
+            auto nl = static_cast<const char *>(memchr(c, '\n', e - c));
+            if (!nl)
+                break;
+            c = nl + 1;
+            atStartOfLine = true;
+            curIndent = 0;
         }
     }
 
@@ -392,24 +406,38 @@ ParserState::stripIndentation(const PosIdx pos, std::span<std::pair<PosIdx, std:
     };
     const auto trimString = [&](const StringToken & t) {
         std::string s2;
-        for (size_t j = 0; j < t.l; ++j) {
+        s2.reserve(t.l);
+        const char * c = t.p;
+        const char * e = t.p + t.l;
+        while (c < e) {
             if (atStartOfLine) {
-                if (t.p[j] == ' ') {
-                    if (curDropped++ >= minIndent)
-                        s2 += t.p[j];
-                } else if (t.p[j] == '\n') {
+                /* Keep the spaces past the first `minIndent` of the line */
+                const char * sp = c;
+                while (sp < e && *sp == ' ')
+                    sp++;
+                size_t k = sp - c;
+                size_t from = std::max(curDropped, minIndent);
+                if (curDropped + k > from)
+                    s2.append(curDropped + k - from, ' ');
+                curDropped += k;
+                c = sp;
+                if (c == e)
+                    break;
+                if (*c == '\n') {
                     curDropped = 0;
-                    s2 += t.p[j];
-                } else {
-                    atStartOfLine = false;
-                    curDropped = 0;
-                    s2 += t.p[j];
+                    s2 += '\n';
+                    c++;
+                    continue;
                 }
-            } else {
-                s2 += t.p[j];
-                if (t.p[j] == '\n')
-                    atStartOfLine = true;
+                atStartOfLine = false;
+                curDropped = 0;
             }
+            auto nl = static_cast<const char *>(memchr(c, '\n', e - c));
+            const char * stop = nl ? nl + 1 : e;
+            s2.append(c, stop - c);
+            c = stop;
+            if (nl)
+                atStartOfLine = true;
         }
 
         /* Remove the last line if it is empty and consists only of
