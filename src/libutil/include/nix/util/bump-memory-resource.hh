@@ -72,8 +72,10 @@ class ThreadCachedMemoryResource : public std::pmr::memory_resource
         char * end;
     };
 
-    /* Zero, like every thread_local */
-    static inline thread_local Cache cache;
+    /* Zero, like every thread_local. Initial exec, since libnixutil is
+       never loaded with dlopen, so that reaching it is a load off %fs and
+       not a call to __tls_get_addr */
+    __attribute__((tls_model("initial-exec"))) static inline thread_local Cache cache;
 
     std::pmr::memory_resource * upstream;
     const std::uint64_t serial = nextSerial.fetch_add(1, std::memory_order_relaxed);
