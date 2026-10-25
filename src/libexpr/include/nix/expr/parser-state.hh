@@ -223,8 +223,9 @@ inline void ParserState::addAttr(
     for (i = attrPath.begin(); i + 1 < attrPath.end(); i++) {
         ExprAttrs * nested;
         if (i->symbol) {
-            ExprAttrs::AttrDefs::iterator j = attrs->attrs->find(i->symbol);
-            if (j != attrs->attrs->end()) {
+            /* One walk down the tree, which the insert takes as its hint */
+            ExprAttrs::AttrDefs::iterator j = attrs->attrs->lower_bound(i->symbol);
+            if (j != attrs->attrs->end() && j->first == i->symbol) {
                 nested = dynamic_cast<ExprAttrs *>(j->second.e);
                 if (!nested) {
                     attrPath.erase(i + 1, attrPath.end());
@@ -232,7 +233,7 @@ inline void ParserState::addAttr(
                 }
             } else {
                 nested = exprs.add<ExprAttrs>(exprs.alloc);
-                (*attrs->attrs)[i->symbol] = ExprAttrs::AttrDef(nested, pos);
+                attrs->attrs->emplace_hint(j, i->symbol, ExprAttrs::AttrDef(nested, pos));
             }
         } else {
             nested = exprs.add<ExprAttrs>(exprs.alloc);
@@ -265,8 +266,8 @@ inline void ParserState::addAttr(
 inline void
 ParserState::addAttr(ExprAttrs * attrs, AttrSelectionPath & attrPath, const Symbol & symbol, ExprAttrs::AttrDef && def)
 {
-    ExprAttrs::AttrDefs::iterator j = attrs->attrs->find(symbol);
-    if (j != attrs->attrs->end()) {
+    ExprAttrs::AttrDefs::iterator j = attrs->attrs->lower_bound(symbol);
+    if (j != attrs->attrs->end() && j->first == symbol) {
         // This attr path is already defined. However, if both
         // e and the expr pointed by the attr path are two attribute sets,
         // we want to merge them.
@@ -310,7 +311,7 @@ ParserState::addAttr(ExprAttrs * attrs, AttrSelectionPath & attrPath, const Symb
         }
     } else {
         // This attr path is not defined. Let's create it.
-        attrs->attrs->emplace(symbol, def);
+        attrs->attrs->emplace_hint(j, symbol, def);
         def.e->setName(symbol);
     }
 }

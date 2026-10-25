@@ -2024,9 +2024,11 @@ void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
 {
     if (!inherit.from) {
         for (auto & [i, iPos] : inherit.names) {
-            if (attrs->attrs->find(i.symbol) != attrs->attrs->end())
-                st.dupAttr(i.symbol, iPos, (*attrs->attrs)[i.symbol].pos);
-            attrs->attrs->emplace(
+            auto j = attrs->attrs->lower_bound(i.symbol);
+            if (j != attrs->attrs->end() && j->first == i.symbol)
+                st.dupAttr(i.symbol, iPos, j->second.pos);
+            attrs->attrs->emplace_hint(
+                j,
                 i.symbol,
                 ExprAttrs::AttrDef(st.exprs.add<ExprVar>(iPos, i.symbol), iPos, ExprAttrs::AttrDef::Kind::Inherited));
         }
@@ -2038,9 +2040,11 @@ void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
     attrs->inheritFromExprs->push_back(inherit.from);
     auto fromExpr = st.exprs.add<ExprInheritFrom>(at(inherit.fromBegin), attrs->inheritFromExprs->size() - 1);
     for (auto & [i, iPos] : inherit.names) {
-        if (attrs->attrs->find(i.symbol) != attrs->attrs->end())
-            st.dupAttr(i.symbol, iPos, (*attrs->attrs)[i.symbol].pos);
-        attrs->attrs->emplace(
+        auto j = attrs->attrs->lower_bound(i.symbol);
+        if (j != attrs->attrs->end() && j->first == i.symbol)
+            st.dupAttr(i.symbol, iPos, j->second.pos);
+        attrs->attrs->emplace_hint(
+            j,
             i.symbol,
             ExprAttrs::AttrDef(
                 st.exprs.add<ExprSelect>(st.exprs.alloc, iPos, fromExpr, i.symbol),
