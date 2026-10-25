@@ -15,6 +15,10 @@ typedef boost::unordered_flat_map<PosIdx, DocComment, std::hash<PosIdx>> DocComm
  *
  * `text` holds `length` bytes, the last two of which must be NUL; the
  * parser writes into the buffer
+ *
+ * With `imports` set, the paths of `import <path literal>` calls and the
+ * `.nix` path literals in lists are added to it. With `quiet` set, the parse throws `ParseAbandoned`
+ * instead of printing a warning
  */
 Expr * parseExprFromBuf(
     char * text,
@@ -26,7 +30,9 @@ Expr * parseExprFromBuf(
     const EvalSettings & settings,
     PosTable & positions,
     DocCommentMap & docComments,
-    const ref<SourceAccessor> rootFS);
+    const ref<SourceAccessor> rootFS,
+    std::vector<SourcePath> * imports = nullptr,
+    bool quiet = false);
 
 /**
  * Parse REPL bindings from a buffer

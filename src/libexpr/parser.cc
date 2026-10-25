@@ -245,6 +245,7 @@ class Parser
     /* Parsing a piece of a big attribute set, which must not start
        parsing pieces itself */
     bool inPiece = false;
+    Symbol sImport;
 
     PosIdx at(uint32_t offset)
     {
@@ -489,6 +490,8 @@ public:
         , t(tk.tokens.data())
     {
         symbolCache.start(st.symbols);
+        if (st.imports)
+            sImport = symbolCache.get(st.symbols, "import");
     }
 
     Expr * parseStart(bool repl);
@@ -818,6 +821,10 @@ E Parser::parseExprApp()
     Expr * acc = first.e;
     while (simpleStarts[kind()]) {
         auto arg = parseExprSelect();
+        if (st.imports && acc == first.e)
+            if (auto var = dynamic_cast<ExprVar *>(acc); var && var->name == sImport)
+                if (auto path = dynamic_cast<ExprPath *>(arg.e))
+                    st.imports->push_back(path->v.path());
         acc = makeCall(at(first.begin), acc, arg.e);
         warnIfCursedOr(arg.e);
     }
@@ -1107,6 +1114,10 @@ E Parser::parseSimple()
             auto e = parseExprSelect();
             list.push_back(e.e);
             warnIfCursedOr(e.e);
+            /* As in `imports = [ ./foo.nix ]` */
+            if (st.imports)
+                if (auto path = dynamic_cast<ExprPath *>(e.e); path && path->v.pathStrView().ends_with(".nix"))
+                    st.imports->push_back(path->v.path());
         }
         expect(RBRACKET, {});
         return {ex.add<ExprList>(ex.alloc, list), tok.begin};
@@ -1270,6 +1281,7 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
     {
         std::vector<Binding> bindings;
         std::vector<std::pair<PosIdx, DocComment>> docs;
+        std::vector<SourcePath> imports;
         bool ok = false;
     };
 
@@ -1306,6 +1318,8 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
                 ParserState pst = st;
                 pst.deferredDocs = &r.docs;
                 pst.quiet = true;
+                if (st.imports)
+                    pst.imports = &r.imports;
                 Parser p(pst, ls, text, tk);
                 p.t = base + cuts[i];
                 p.depth = startDepth;
@@ -1336,6 +1350,8 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
             continue;
         }
         addDocs(r.docs);
+        if (st.imports)
+            st.imports->insert(st.imports->end(), r.imports.begin(), r.imports.end());
         if (!attrs && !r.bindings.empty())
             attrs = st.exprs.add<ExprAttrs>();
         for (auto & b : r.bindings) {
@@ -1441,7 +1457,9 @@ Expr * parse(
     PosTable & positions,
     DocCommentMap & docComments,
     const ref<SourceAccessor> rootFS,
-    bool repl)
+    bool repl,
+    std::vector<SourcePath> * imports,
+    bool quiet)
 {
     LexerState lexerState{
         .positionToDocComment = docComments,
@@ -1457,6 +1475,8 @@ Expr * parse(
         .origin = lexerState.origin,
         .rootFS = rootFS,
         .settings = settings,
+        .quiet = quiet,
+        .imports = imports,
     };
 
     assert(length >= 2 && text[length - 1] == 0 && text[length - 2] == 0);
@@ -1478,9 +1498,12 @@ Expr * parseExprFromBuf(
     const EvalSettings & settings,
     PosTable & positions,
     DocCommentMap & docComments,
-    const ref<SourceAccessor> rootFS)
+    const ref<SourceAccessor> rootFS,
+    std::vector<SourcePath> * imports,
+    bool quiet)
 {
-    return parse(text, length, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, false);
+    return parse(
+        text, length, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, false, imports, quiet);
 }
 
 ExprAttrs * parseReplBindingsFromBuf(
@@ -1495,7 +1518,8 @@ ExprAttrs * parseReplBindingsFromBuf(
     DocCommentMap & docComments,
     const ref<SourceAccessor> rootFS)
 {
-    auto result = parse(text, length, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, true);
+    auto result =
+        parse(text, length, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, true, nullptr, false);
     assert(result);
     auto bindings = dynamic_cast<ExprAttrs *>(result);
     assert(bindings);

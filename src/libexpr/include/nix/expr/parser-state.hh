@@ -172,6 +172,9 @@ struct ParserState
     /* Parsing ahead of time: rather than warn, throw `ParseAbandoned`, so
        that a parse in the right order warns instead */
     bool quiet = false;
+    /* Where to note the paths that are imported by name, as in
+       `import ./foo.nix`, if anywhere */
+    std::vector<SourcePath> * imports = nullptr;
 
     void dupAttr(const AttrSelectionPath & attrPath, const PosIdx pos, const PosIdx prevPos);
     void dupAttr(Symbol attr, const PosIdx pos, const PosIdx prevPos);
