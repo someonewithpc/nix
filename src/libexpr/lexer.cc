@@ -159,24 +159,49 @@ struct Match
     }
 };
 
-struct Keyword
+/* Up to 8 bytes as a little-endian word, the way `keywordOf` compares
+   them */
+constexpr uint64_t pack(std::string_view t)
 {
-    std::string_view text;
-    Kind kind;
-};
+    uint64_t w = 0;
+    for (size_t i = 0; i < t.size(); i++)
+        w |= uint64_t(uint8_t(t[i])) << (8 * i);
+    return w;
+}
 
-constexpr Keyword keywords[] = {
-    {"if", IF},
-    {"then", THEN},
-    {"else", ELSE},
-    {"assert", ASSERT},
-    {"with", WITH},
-    {"let", LET},
-    {"in", IN_KW},
-    {"rec", REC},
-    {"inherit", INHERIT},
-    {"or", OR_KW},
-};
+/* The keyword spelled by the `len` bytes at `p`, or ID. One word compare
+   per candidate of the right length instead of a string compare per
+   keyword */
+Kind keywordOf(const char * p, uint32_t len)
+{
+    if (len < 2 || len > 7)
+        return ID;
+    uint64_t w;
+    if (len >= 4) {
+        uint32_t lo, hi;
+        memcpy(&lo, p, 4);
+        memcpy(&hi, p + len - 4, 4);
+        w = lo | (uint64_t(hi) << ((len - 4) * 8));
+    } else {
+        uint16_t lo;
+        memcpy(&lo, p, 2);
+        w = lo | (len == 3 ? uint64_t(uint8_t(p[2])) << 16 : 0);
+    }
+    switch (len) {
+    case 2:
+        return w == pack("if") ? IF : w == pack("in") ? IN_KW : w == pack("or") ? OR_KW : ID;
+    case 3:
+        return w == pack("let") ? LET : w == pack("rec") ? REC : ID;
+    case 4:
+        return w == pack("then") ? THEN : w == pack("else") ? ELSE : w == pack("with") ? WITH : ID;
+    case 6:
+        return w == pack("assert") ? ASSERT : ID;
+    case 7:
+        return w == pack("inherit") ? INHERIT : ID;
+    default:
+        return ID;
+    }
+}
 
 Kind charKind(unsigned char c)
 {
@@ -670,13 +695,7 @@ bool Lexer::lexDefault(uint32_t & p)
         /* Only these can make it a path or a URI instead */
         if (d != '/' && d != ':' && d != '.' && d != '+') {
             uint32_t l = e - p;
-            Kind k = ID;
-            if (l <= 7)
-                for (auto & kw : keywords)
-                    if (kw.text.size() == l && std::string_view(s + p, l) == kw.text) {
-                        k = kw.kind;
-                        break;
-                    }
+            Kind k = keywordOf(s + p, l);
             adjust(l);
             emit(k);
             p = e;
@@ -801,11 +820,8 @@ bool Lexer::lexDefault(uint32_t & p)
         if (is(c, IdStart)) {
             uint32_t l = run(p, IdCont) - p;
             m.offer(l, RId, ID);
-            for (auto & kw : keywords)
-                if (kw.text.size() == l && std::string_view(s + p, l) == kw.text) {
-                    m.offer(l, RKeyword, kw.kind);
-                    break;
-                }
+            if (Kind k = keywordOf(s + p, l); k != ID)
+                m.offer(l, RKeyword, k);
         }
         if (is(c, Digit)) {
             m.offer(run(p, Digit) - p, RInt, INT_LIT);
