@@ -148,4 +148,10 @@ struct Tokens
  */
 Tokens lex(char * text, size_t length, LexerState & lexerState, bool replBindings);
 
+/**
+ * Give the buffers of `tokens` back for the next `lex` to fill, so that
+ * their pages stay mapped
+ */
+void recycle(Tokens && tokens);
+
 } // namespace nix::lexer

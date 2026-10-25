@@ -9,6 +9,7 @@
 #include "nix/expr/diagnose.hh"
 #include "nix/expr/eval.hh"
 #include "nix/expr/parser-state.hh"
+#include "nix/util/finally.hh"
 #include "nix/util/users.hh"
 #include "nix/util/util.hh"
 
@@ -1190,6 +1191,7 @@ Expr * parse(
 
     assert(length >= 2 && text[length - 1] == 0 && text[length - 2] == 0);
     auto tokens = lexer::lex(text, length - 2, lexerState, repl);
+    Finally recycle([&] { lexer::recycle(std::move(tokens)); });
     Parser parser(state, lexerState, text, tokens);
     return parser.parseStart(repl);
 }

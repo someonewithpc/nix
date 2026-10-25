@@ -18,6 +18,53 @@ namespace nix::lexer {
 
 namespace {
 
+/* Token vectors that were used before, biggest first */
+class TokenPool
+{
+    std::mutex m;
+    std::vector<std::vector<Token>> spare;
+    size_t bytes = 0;
+    static constexpr size_t maxBytes = size_t(256) << 20;
+
+public:
+    std::vector<Token> get(size_t want)
+    {
+        std::lock_guard lock(m);
+        /* The smallest one that is big enough, or else the biggest */
+        size_t best = spare.size();
+        for (size_t i = 0; i < spare.size(); i++)
+            if (spare[i].capacity() >= want && (best == spare.size() || spare[i].capacity() < spare[best].capacity()))
+                best = i;
+        if (best == spare.size()) {
+            if (spare.empty())
+                return {};
+            best = 0;
+            for (size_t i = 1; i < spare.size(); i++)
+                if (spare[i].capacity() > spare[best].capacity())
+                    best = i;
+        }
+        auto v = std::move(spare[best]);
+        spare.erase(spare.begin() + best);
+        bytes -= v.capacity() * sizeof(Token);
+        return v;
+    }
+
+    void put(std::vector<Token> && v)
+    {
+        size_t b = v.capacity() * sizeof(Token);
+        if (b < 4096)
+            return;
+        v.clear();
+        std::lock_guard lock(m);
+        if (bytes + b > maxBytes)
+            return;
+        bytes += b;
+        spare.push_back(std::move(v));
+    }
+};
+
+TokenPool tokenPool;
+
 /* Threads that lex the chunks of big files, kept between files */
 class LexPool
 {
@@ -623,7 +670,16 @@ public:
 
     void reserve(uint32_t bytes)
     {
-        out.tokens.reserve(bytes / 4 + 16);
+        size_t want = bytes / 4 + 16;
+        if (out.tokens.capacity() < want) {
+            out.tokens = tokenPool.get(want);
+            out.tokens.reserve(want);
+        }
+    }
+
+    void recycle()
+    {
+        tokenPool.put(std::move(out.tokens));
     }
 
     /* Take over the tokens of the speculative lexer of the chunk that
@@ -1248,7 +1304,7 @@ Tokens lexParallel(char * text, uint32_t length, LexerState & ls, unsigned chunk
     lexers.reserve(k);
     lexers.emplace_back(text, length, ls);
     lexers[0].defer = true;
-    lexers[0].reserve(cuts[1]);
+    lexers[0].reserve(length);
     for (size_t i = 1; i < k; i++) {
         states.push_back(
             LexerState{
@@ -1266,9 +1322,12 @@ Tokens lexParallel(char * text, uint32_t length, LexerState & ls, unsigned chunk
     pool.run(k, [&](size_t i) { lexers[i].runTo(cuts[i + 1]); }, maxChunks() - 1);
 
     auto & real = lexers[0];
-    for (size_t i = 1; i < k; i++)
+    real.reserve(length);
+    for (size_t i = 1; i < k; i++) {
         if (!real.append(lexers[i]))
             real.runTo(cuts[i + 1]);
+        lexers[i].recycle();
+    }
     real.unescapeDeferred();
     return real.take();
 }
@@ -1411,6 +1470,11 @@ Tokens lex(char * text, size_t length, LexerState & lexerState, bool replBinding
     Lexer lexer(text, length, lexerState);
     auto tokens = lexer.run(replBindings);
     return tokens;
+}
+
+void recycle(Tokens && tokens)
+{
+    tokenPool.put(std::move(tokens.tokens));
 }
 
 } // namespace nix::lexer
