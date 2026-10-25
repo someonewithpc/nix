@@ -157,6 +157,52 @@ about 35 MB for prefetching, about 60 MB for 8 pool threads, and about 65
 MB that is there even with 2 threads and no prefetching. That last part
 has not been tracked down
 
+### Tuning on beryllium
+
+From a74d36456 to 9c82c80ed, one thread, the dev (-O2) build, corpus of
+5969 files: lex+parse went from 0.320 s to 0.240 s and bindVars from
+65 ms to 35 ms. Each step was timed with `ab.sh` against the libraries
+before it
+
+| Change | Gain |
+|---|---|
+| Symbol cache tail loads without a stack round trip | (in the 6% below) |
+| Attribute sets and call arguments built in the Expr arena | bindVars 68 to 35 ms |
+| Keyword lookup by packed word, `adjust` inlined | 5% |
+| Whitespace lexed with the token after it | 1.7% |
+| Token accessors inlined in the parser | 4% |
+| Identifiers before `.` kept on the fast path | 3% |
+| `{ } " = .` emitted directly | 2% |
+| Comment ends found with the star mask | 1% |
+| `stripIndentation` a run at a time | 3% |
+| Symbol cache looked up once, Expr chunk TLS initial exec | 4% |
+| Location offsets moved as one word | 1.5% |
+| Direct returns for the commonest rules | 1% |
+| String runs without escapes copied at once | 0.5% |
+
+AVX-512 VBMI classifies a 64-byte block with one `vpermb` and eight
+`vptestmb`, at 19 GB/s against 5.1 GB/s for AVX2. The escape finder
+(`\`, `\r`, NUL) runs at about the same speed, ending with a masked load
+instead of a scalar tail. Classification was only about 2% of a parse to
+begin with, so most of the gains above are elsewhere
+
+Tried and dropped, because they measured as noise:
+
+- Threaded dispatch with computed gotos for the parser's returns. GCC
+  merged the jumps again and branch misses did not move
+- One 8-byte store of the location in `adjust` alone, before the stash
+  was changed too
+- Inlining `emit`, or the bump allocator into `Exprs::add`
+- Skipping the cursed `or` checks gave nothing on its own, but is kept
+
+About one branch miss per token remains (53M per five passes), almost all
+of it the lexer choosing a rule and the parser choosing a continuation
+
+LTO makes the parser slower. -O2 release without LTO matches the dev
+build, while -O2 or -O3 with LTO is 3-4% slower on lex+parse. Under LTO
+GCC stops inlining `emit`, `scan` and `sym` into the hot rules, and
+forcing them inline did not win it back
+
 ## Left to do
 
 - Find the 65 MB the branch uses over Bison in a NixOS eval with
