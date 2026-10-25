@@ -279,6 +279,9 @@ class Parser
     char * const text;
     const Tokens & tk;
     const Token * t;
+    /* This thread's, looked up once: a thread_local with a constructor
+       goes through a wrapper on every use */
+    SymbolCache & symbols = symbolCache;
 
     /* The `{` and `}` of the attribute sets big enough to parse in
        pieces, by `{` */
@@ -413,7 +416,7 @@ class Parser
 
     Symbol sym(const Token & tok)
     {
-        return symbolCache.get(st.symbols, raw(tok));
+        return symbols.get(st.symbols, raw(tok));
     }
 
     void setDocPosition(ExprLambda * lambda, uint32_t begin)
@@ -626,9 +629,9 @@ public:
         , tk(tk)
         , t(tk.tokens.data())
     {
-        symbolCache.start(st.symbols);
+        symbols.start(st.symbols);
         if (st.imports)
-            sImport = symbolCache.get(st.symbols, "import");
+            sImport = symbols.get(st.symbols, "import");
     }
 
     Expr * parseStart(bool repl);
