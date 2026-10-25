@@ -229,6 +229,7 @@ struct WhileTryingToUse
 std::ostream & operator<<(std::ostream & os, WhileTryingToUse w);
 
 struct RegexCache;
+struct ImportPrefetcher;
 
 ref<RegexCache> makeRegexCache();
 
@@ -985,6 +986,19 @@ private:
         Pos::Origin origin,
         const SourcePath & basePath,
         const std::shared_ptr<StaticEnv> & staticEnv);
+
+    /**
+     * Bind the variables of a parsed expression and keep its doc comments
+     */
+    Expr * finishParse(
+        Expr * e, const Pos::Origin & origin, ref<DocCommentMap> docComments, const std::shared_ptr<StaticEnv> & staticEnv);
+
+    /**
+     * Reads and parses imported files ahead of evaluation, if enabled
+     */
+    std::unique_ptr<ImportPrefetcher> importPrefetcher;
+
+    friend struct ImportPrefetcher;
 
     ExprAttrs * parseReplBindings(
         char * text,

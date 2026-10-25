@@ -44,6 +44,11 @@
 #include <functional>
 #include <ranges>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 #include <boost/container/small_vector.hpp>
@@ -239,6 +244,163 @@ EvalMemory::EvalMemory()
     assertGCInitialized();
 }
 
+/* Reads and parses the files that evaluated code names by a path literal
+   in `import ./foo.nix` or in a list such as `imports = [ ./foo.nix ]`,
+   on other threads, before evaluation gets to them. The evaluator takes a
+   file's parse if there is one, and otherwise parses the file itself; a
+   parse ahead of time that fails or would warn is dropped, so that one
+   counts as not there. The paths in a file are only queued once the
+   evaluator takes it, so files that nothing evaluates cost little */
+struct ImportPrefetcher
+{
+    struct File
+    {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+        Expr * e = nullptr;
+        ref<DocCommentMap> docComments = make_ref<DocCommentMap>();
+        std::vector<SourcePath> imports;
+    };
+
+    EvalState & state;
+    std::mutex m;
+    std::condition_variable wake;
+    std::deque<SourcePath> queue;
+    std::unordered_set<SourcePath> seen;
+    /* By resolved path; null once the evaluator has asked for it */
+    std::unordered_map<SourcePath, std::shared_ptr<File>> files;
+    bool stop = false;
+    std::vector<std::thread> threads;
+
+    /* NIX_PREFETCH_IMPORTS threads, or none to turn it off */
+    static unsigned threadCount()
+    {
+        if (auto e = getEnv("NIX_PREFETCH_IMPORTS"))
+            return string2Int<unsigned>(*e).value_or(0);
+        return 2;
+    }
+
+    ImportPrefetcher(EvalState & state, unsigned n)
+        : state(state)
+    {
+        for (unsigned i = 0; i < n; i++)
+            threads.emplace_back([this] { work(); });
+    }
+
+    ~ImportPrefetcher()
+    {
+        {
+            std::lock_guard lock(m);
+            stop = true;
+        }
+        wake.notify_all();
+        for (auto & t : threads)
+            t.join();
+    }
+
+    void add(const std::vector<SourcePath> & paths)
+    {
+        if (paths.empty())
+            return;
+        {
+            std::lock_guard lock(m);
+            for (auto & p : paths)
+                if (seen.insert(p).second)
+                    queue.push_back(p);
+        }
+        wake.notify_all();
+    }
+
+    /* The file's parse, waiting for it if it is still going, or null if
+       there is none */
+    Expr * take(const SourcePath & resolved, ref<DocCommentMap> & docComments)
+    {
+        std::shared_ptr<File> f;
+        {
+            std::lock_guard lock(m);
+            auto [i, added] = files.try_emplace(resolved, nullptr);
+            if (added)
+                return nullptr;
+            f = std::move(i->second);
+        }
+        if (!f)
+            return nullptr;
+        std::unique_lock lock(f->m);
+        f->cv.wait(lock, [&] { return f->done; });
+        lock.unlock();
+        add(f->imports);
+        docComments = f->docComments;
+        return f->e;
+    }
+
+    void work()
+    {
+#if NIX_USE_BOEHMGC
+        GC_stack_base base;
+        GC_get_stack_base(&base);
+        auto registered = GC_register_my_thread(&base);
+        Finally unregister([&] {
+            if (registered == GC_SUCCESS)
+                GC_unregister_my_thread();
+        });
+#endif
+        while (true) {
+            SourcePath path{state.rootFS};
+            {
+                std::unique_lock lock(m);
+                wake.wait(lock, [&] { return stop || !queue.empty(); });
+                if (stop)
+                    return;
+                path = std::move(queue.front());
+                queue.pop_front();
+            }
+            parse(path);
+        }
+    }
+
+    void parse(const SourcePath & path)
+    {
+        std::shared_ptr<File> f;
+        try {
+            auto resolved = resolveExprPath(path);
+            state.importResolutionCache->emplace(path, resolved);
+            {
+                std::lock_guard lock(m);
+                auto [i, added] = files.try_emplace(resolved, nullptr);
+                if (!added)
+                    return;
+                i->second = f = std::make_shared<File>();
+            }
+            auto buffer = resolved.resolveSymlinks().readFile();
+            buffer.append("\0\0", 2);
+            f->e = parseExprFromBuf(
+                buffer.data(),
+                buffer.size(),
+                Pos::Origin(resolved),
+                resolved.parent(),
+                state.mem.exprs,
+                state.symbols,
+                state.settings,
+                state.positions,
+                *f->docComments,
+                state.rootFS,
+                &f->imports,
+                true);
+        } catch (...) {
+            if (f)
+                f->e = nullptr;
+        }
+        if (!f)
+            return;
+        {
+            std::lock_guard lock(f->m);
+            f->done = true;
+        }
+        f->cv.notify_all();
+    }
+};
+
 EvalState::EvalState(
     const LookupPath & lookupPathFromArguments,
     ref<Store> store,
@@ -378,6 +540,9 @@ EvalState::EvalState(
 
     createBaseEnv(settings);
 
+    if (auto threads = ImportPrefetcher::threadCount())
+        importPrefetcher = std::make_unique<ImportPrefetcher>(*this, threads);
+
     /* Register function call tracer. */
     if (settings.traceFunctionCalls)
         profiler.addProfiler(make_ref<FunctionCallTrace>());
@@ -392,7 +557,11 @@ EvalState::EvalState(
     }
 }
 
-EvalState::~EvalState() {}
+EvalState::~EvalState()
+{
+    /* Its threads use the rest of the state */
+    importPrefetcher.reset();
+}
 
 void EvalState::allowPathLegacy(const std::string & path)
 {
@@ -3241,6 +3410,11 @@ Expr * EvalState::parseExprFromFile(const SourcePath & path)
 
 Expr * EvalState::parseExprFromFile(const SourcePath & path, const std::shared_ptr<StaticEnv> & staticEnv)
 {
+    if (importPrefetcher) {
+        auto docComments = make_ref<DocCommentMap>();
+        if (auto e = importPrefetcher->take(path, docComments))
+            return finishParse(e, Pos::Origin(path), docComments, staticEnv);
+    }
     auto buffer = path.resolveSymlinks().readFile();
     // readFile hopefully have left some extra space for terminators
     buffer.append("\0\0", 2);
@@ -3423,9 +3597,28 @@ Expr * EvalState::parse(
 {
     auto tmpDocComments = make_ref<DocCommentMap>();
 
+    std::vector<SourcePath> imports;
     auto result = parseExprFromBuf(
-        text, length, origin, basePath, mem.exprs, symbols, settings, positions, *tmpDocComments, rootFS);
+        text,
+        length,
+        origin,
+        basePath,
+        mem.exprs,
+        symbols,
+        settings,
+        positions,
+        *tmpDocComments,
+        rootFS,
+        importPrefetcher ? &imports : nullptr);
+    if (importPrefetcher)
+        importPrefetcher->add(imports);
 
+    return finishParse(result, origin, tmpDocComments, staticEnv);
+}
+
+Expr * EvalState::finishParse(
+    Expr * result, const Pos::Origin & origin, ref<DocCommentMap> tmpDocComments, const std::shared_ptr<StaticEnv> & staticEnv)
+{
     result->bindVars(*this, staticEnv);
 
     if (auto sourcePath = std::get_if<SourcePath>(&origin))
