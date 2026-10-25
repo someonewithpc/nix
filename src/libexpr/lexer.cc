@@ -342,14 +342,14 @@ private:
     }
 
     /* `adjustLoc`, run before the action of every matched rule */
-    void adjust(uint32_t len)
+    [[gnu::always_inline]] void adjust(uint32_t len)
     {
         loc.stash();
-        if (docDistance == 1) {
+        if (docDistance == 1) [[unlikely]] {
             ParserLocation doc{ls.lastDocCommentLoc.beginOffset, 0, 0, 0};
             ParserLocation docEnd{ls.lastDocCommentLoc.endOffset, 0, 0, 0};
             ls.positionToDocComment.emplace(ls.at(loc), DocComment{ls.at(doc), ls.at(docEnd)});
-        } else if (spec && docDistance >= specBase && docDistance <= specBase + 1)
+        } else if (spec && docDistance >= specBase && docDistance <= specBase + 1) [[unlikely]]
             docCandidates.emplace_back(docDistance - specBase, ls.at(loc));
         docDistance++;
         loc.beginOffset = loc.endOffset;
