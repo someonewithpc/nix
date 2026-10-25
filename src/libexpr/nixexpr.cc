@@ -401,6 +401,10 @@ ExprAttrs::bindInheritSources(EvalState & es, const std::shared_ptr<const Static
 
 void ExprAttrs::moveDataToAllocator(std::pmr::polymorphic_allocator<char> & alloc)
 {
+    /* What the parser made is there already */
+    if (attrs->get_allocator() == alloc && dynamicAttrs->get_allocator() == alloc
+        && (!inheritFromExprs || inheritFromExprs->get_allocator() == alloc))
+        return;
     AttrDefs newAttrs{std::move(*attrs), alloc};
     attrs.emplace(std::move(newAttrs), alloc);
     DynamicAttrDefs newDynamicAttrs{std::move(*dynamicAttrs), alloc};
@@ -487,6 +491,8 @@ void ExprLambda::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv>
 
 void ExprCall::moveDataToAllocator(std::pmr::polymorphic_allocator<char> & alloc)
 {
+    if (args->get_allocator() == alloc)
+        return;
     std::pmr::vector<Expr *> newArgs{std::move(*args), alloc};
     args.emplace(std::move(newArgs), alloc);
 }
