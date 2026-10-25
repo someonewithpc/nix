@@ -516,12 +516,12 @@ private:
 
     /* The block comment rules, as a length, and whether it is a doc
        comment */
-    uint32_t blockCommentLen(uint32_t p, bool & doc) const
+    uint32_t blockCommentLen(uint32_t p, bool & doc)
     {
         if (p + 1 >= n || s[p + 1] != '*')
             return 0;
-        for (uint32_t q = p + 2; q + 1 < n; q++)
-            if (s[q] == '*' && s[q + 1] == '/') {
+        for (uint32_t q = scan<true>(p + 2, &simd::Masks::star); q + 1 < n; q = scan<true>(q + 1, &simd::Masks::star))
+            if (s[q + 1] == '/') {
                 /* A doc comment opens with a slash and two stars, then neither a
                    slash nor a star */
                 doc = q > p + 2 && s[p + 2] == '*' && s[p + 3] != '/' && s[p + 3] != '*';
