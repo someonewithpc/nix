@@ -123,22 +123,48 @@ class SymbolCache
     size_t used = 0;
     uint64_t serial = 0;
 
+    static uint64_t load64(const char * p)
+    {
+        uint64_t w;
+        memcpy(&w, p, 8);
+        return w;
+    }
+
+    /* The first `len` bytes at `p`, zero-extended, for `len` up to 8. Two
+       loads that overlap but stay inside the string: copying the bytes to
+       the stack and loading them back as a word stalls on store forwarding,
+       which was most of the time spent here */
+    static uint64_t loadTail(const char * p, size_t len)
+    {
+        if (len >= 8)
+            return load64(p);
+        if (len >= 4) {
+            uint32_t lo, hi;
+            memcpy(&lo, p, 4);
+            memcpy(&hi, p + len - 4, 4);
+            return lo | (uint64_t(hi) << ((len - 4) * 8));
+        }
+        if (len == 0)
+            return 0;
+        auto b = [&](size_t i) { return uint64_t(uint8_t(p[i])) << (i * 8); };
+        return b(0) | b(len / 2) | b(len - 1);
+    }
+
+    static uint64_t mix(uint64_t h, uint64_t w)
+    {
+        return (std::rotl(h, 29) ^ w) * 0x9e3779b97f4a7c15ull;
+    }
+
     static uint64_t hashOf(const char * p, size_t len)
     {
-        constexpr uint64_t k = 0x9e3779b97f4a7c15ull;
-        uint64_t h = len * k;
+        uint64_t h = len * 0x9e3779b97f4a7c15ull;
         while (len >= 8) {
-            uint64_t w;
-            memcpy(&w, p, 8);
-            h = (std::rotl(h, 29) ^ w) * k;
+            h = mix(h, load64(p));
             p += 8;
             len -= 8;
         }
-        if (len) {
-            uint64_t w = 0;
-            memcpy(&w, p, len);
-            h = (std::rotl(h, 29) ^ w) * k;
-        }
+        if (len)
+            h = mix(h, loadTail(p, len));
         return h ^ (h >> 32);
     }
 
@@ -189,14 +215,32 @@ public:
 
     Symbol get(SymbolTable & symbols, std::string_view s)
     {
+        if (s.size() <= inlineLen) {
+            /* The name as the zero-padded words the entry keeps */
+            size_t n = s.size();
+            uint64_t w0 = loadTail(s.data(), std::min<size_t>(n, 8));
+            uint64_t w1 = n > 8 ? loadTail(s.data() + 8, n - 8) : 0;
+            uint64_t h = n * 0x9e3779b97f4a7c15ull;
+            if (n)
+                h = mix(h, w0);
+            if (n > 8)
+                h = mix(h, w1);
+            h ^= h >> 32;
+            size_t mask = entries.size() - 1;
+            size_t i = h & mask;
+            for (; entries[i].sym; i = (i + 1) & mask) {
+                auto & e = entries[i];
+                if (e.hash == h && e.len == n && load64(e.text) == w0 && load64(e.text + 8) == w1)
+                    return e.sym;
+            }
+            return insert(symbols, s, h, i);
+        }
         uint64_t h = hashOf(s.data(), s.size());
         size_t mask = entries.size() - 1;
         size_t i = h & mask;
         for (; entries[i].sym; i = (i + 1) & mask) {
             auto & e = entries[i];
-            if (e.hash != h || e.len != s.size())
-                continue;
-            if (memcmp(s.size() <= inlineLen ? e.text : e.ptr, s.data(), s.size()) == 0)
+            if (e.hash == h && e.len == s.size() && memcmp(e.ptr, s.data(), s.size()) == 0)
                 return e.sym;
         }
         return insert(symbols, s, h, i);
