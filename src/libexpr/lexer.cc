@@ -15,6 +15,8 @@
 
 #include "nix/util/util.hh"
 
+#include <boost/container/small_vector.hpp>
+
 namespace nix::lexer {
 
 namespace {
@@ -296,7 +298,8 @@ class Lexer
 
 public:
     State state = Initial;
-    std::vector<State> stack;
+    /* Deep enough for nearly every file without a heap allocation */
+    boost::container::small_vector<State, 64> stack;
     uint32_t pos = 0;
     uint32_t start = 0;
     /* Past an error or the end of the input */
