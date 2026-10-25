@@ -26,6 +26,16 @@ test corpus
   order
 - A thread-local cache sits in front of the symbol table, and each thread
   takes its own allocation chunks from the Expr bump allocator
+- The parser takes a `ParseBuffer` (`parse-buffer.hh`): the text on a
+  64-byte boundary with zero bytes to the end of its last block and for a
+  block more, so the lexer reads whole blocks and looks ahead without end
+  checks. Files are read straight into one, with io_uring where the
+  kernel allows it: a per-thread ring opens, reads and closes each file
+  as a linked chain on direct descriptors, so a batch of files costs one
+  `io_uring_enter`. The accessor still stats each file, which keeps its
+  allow lists and mtime tracking. Without io_uring, or for a failed or
+  short read, the accessor's `readFile` reads the file. Buffers of 2 MB
+  and up are mmapped with `MADV_HUGEPAGE`
 - `EvalState` reads and parses imported files ahead of evaluation on two
   threads (`ImportPrefetcher` in `eval.cc`). Candidates are `import ./x.nix`
   calls and `.nix` path literals in lists. A file's paths are only queued
@@ -57,7 +67,11 @@ Scripts in `bench/scripts`:
 - `make-corpus.sh <dir> <list>` lists the `.nix` files of a source tree
 - `check.sh <old-bench> <new-bench> <list>` compares dumps in eight
   configurations
-- `nixos.nix` is the minimal NixOS system used for timing
+- `nixos.nix` is the minimal NixOS system used for timing, and
+  `eval-nixos.sh <lib-dir> [nix]` runs it. Pass nixpkgs as a string: as a
+  path, the interpolation in `nixos.nix` copies it to the store, and
+  hashing all of nixpkgs took 1.5 s of the 3.1 s every NixOS figure
+  before 2026-10-25 included, for Bison and the branch alike
 - `run-all.sh <base-tree> <list>` builds the branch and its base, checks
   the dumps, checks again under ASan and UBSan, and builds both with O3 and
   LTO
@@ -224,11 +238,61 @@ is stable to a few MB between runs, so these differences are real
 - All pieces were accepted in both hackage and the NixOS eval, so none
   of the AST is built twice
 
+### 2026-10-25 on beryllium
+
+The NixOS benchmark without the nixpkgs hashing (see `eval-nixos.sh`),
+dev builds, hyperfine: Bison 2.24 s and 652 MB, the branch 1.63 s and
+792 MB, 27% faster. `hello.drvPath`: 160 ms against 138 ms
+
+Where a corpus pass goes, one thread: 5.77M tokens in 0.205 s of lex and
+parse, about 190 cycles a token at 5.4 GHz, and 1.7 branch misses a
+token. The lexer is about a third, the parser's state machine a third,
+and building the AST (symbols, the attribute `std::map`, arena
+allocations, string copies) the rest
+
+Mallocs per pass over the corpus (the second pass of two minus a single
+pass), counted with an LD_PRELOAD shim that records callers with
+`backtrace`: 628k before, 86k after these. The rest is mostly per file
+(origins, `SourcePath` copies) and `ExprAttrs` inherit vectors
+
+| Change | Effect |
+|---|---|
+| Parser stacks kept per thread across parses | 170k mallocs fewer |
+| `stripIndentation` buffers kept per thread | 97k fewer |
+| Path literals canonicalised in one buffer | 91k fewer |
+| `bindVars` environments from a per-thread stack, insertion sort | 108k fewer, bindVars 6% faster |
+| All of the above | lex+parse 3.5% faster |
+| String bodies lexed with the `strStop`/`indStop` masks | 1.7% |
+| Common tokens inlined into the lexer loop, the rest out of line | 3.2% |
+| Default-state tokens in an inner loop on a local position | 1.8% |
+| One walk down the attribute map per binding | 0.85% |
+| `E` copied field by field (16-byte load stalled on store forwarding) | 0.6%, Parser::run 22% to 18% of samples |
+| io_uring and padded buffers | within noise on time, 18 MB less memory on NixOS |
+
+Tried and dropped: inlining `Parser::sym` (0.9% slower; the bigger
+`run` costs more than the call)
+
+`bindVars` recursion limits on a 16 MB stack, which the environment
+stack must not lower: 300000 nested lambdas, 280000 `let`s, 390000
+`with`s. Keeping its work out of line keeps the frames as small as
+they were; with it inline the lambda frame grew from 0x98 to 0xc8 bytes
+and the limit fell to 245000
+
+Prefetching costs memory out of proportion to what it saves: `hello`
+peaks at 123 MB without it, 161 MB with one thread and 175 MB with two,
+for no gain in time; NixOS is 1.70 s and 772 MB without it, 1.60 s and
+810 MB with two threads. Most of it is not mimalloc's eager commit
+(with that off, `hello` with two threads is 121 MB), so something the
+prefetch threads keep is worth finding
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
   pool threads cost
 - Time the goto parser against the recursive one on a quiet machine
-- The io_uring loader with a huge-page buffer, if it is still wanted given
-  the numbers above
+- Find what the prefetch threads keep: 38 MB for the first one on `hello`
+- Keep the lexer's location and output pointer in registers across the
+  inner loop; `adjust` and `emit` load and store them every token
+- Replace the attribute `std::map` with a sorted vector: three walks
+  over every set in bindVars, and tree inserts in the parser
 - Build and test NEON under qemu-aarch64
