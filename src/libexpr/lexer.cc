@@ -700,8 +700,15 @@ bool Lexer::lexDefault(uint32_t & p)
     if (is(c, IdStart)) {
         uint32_t e = scan<false>(p + 1, &simd::Masks::ident);
         char d = s[e];
-        /* Only these can make it a path or a URI instead */
-        if (d != '/' && d != ':' && d != '.' && d != '+') {
+        /* Only these can make it a path or a URI instead. After `.` or `+`
+           it still takes a `/` or a `:` where the path characters end, as
+           in `a.b/c` or `a+b:c`, which `foo.bar` does not have */
+        bool plain = d != '/' && d != ':' && d != '.' && d != '+';
+        if (!plain && (d == '.' || d == '+')) {
+            char q = s[scan<false>(e, &simd::Masks::path)];
+            plain = q != '/' && q != ':';
+        }
+        if (plain) {
             uint32_t l = e - p;
             Kind k = keywordOf(s + p, l);
             adjust(l);
