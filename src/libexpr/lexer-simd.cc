@@ -180,6 +180,88 @@ void classify(const unsigned char * block, Masks & out)
 #    pragma GCC pop_options
 #  endif
 
+/* With VBMI one byte permute looks up a whole class byte, one bit per mask,
+   for all 64 bytes of a block at once. The table comes from the scalar
+   backend, so the two cannot disagree */
+namespace avx512 {
+
+enum : uint8_t {
+    BSpace = 1 << 0,
+    BIdent = 1 << 1,
+    BPath = 1 << 2,
+    BDigit = 1 << 3,
+    BStrStop = 1 << 4,
+    BIndStop = 1 << 5,
+    BNewline = 1 << 6,
+    BStar = 1 << 7,
+};
+
+struct alignas(64) Table
+{
+    uint8_t bytes[128];
+};
+
+/* Filled by `supported`, which `pickClassifier` and `allClassifiers` call
+   before handing out `classify` */
+static Table table;
+
+static bool fillTable()
+{
+    auto & t = table;
+    for (unsigned c = 0; c < 128; c++) {
+        unsigned char block[64];
+        for (auto & b : block)
+            b = (unsigned char) c;
+        Masks m;
+        scalar::classify(block, m);
+        t.bytes[c] = (m.space & 1 ? BSpace : 0) | (m.ident & 1 ? BIdent : 0) | (m.path & 1 ? BPath : 0)
+                     | (m.digit & 1 ? BDigit : 0) | (m.strStop & 1 ? BStrStop : 0) | (m.indStop & 1 ? BIndStop : 0)
+                     | (m.newline & 1 ? BNewline : 0) | (m.star & 1 ? BStar : 0);
+    }
+    return true;
+}
+
+#  if defined(__clang__)
+#    pragma clang attribute push(__attribute__((target("avx512f,avx512bw,avx512vbmi"))), apply_to = function)
+#  else
+#    pragma GCC push_options
+#    pragma GCC target("avx512f,avx512bw,avx512vbmi")
+#  endif
+
+void classify(const unsigned char * block, Masks & out)
+{
+    __m512i x = _mm512_loadu_si512(block);
+    __m512i lo = _mm512_load_si512(table.bytes);
+    __m512i hi = _mm512_load_si512(table.bytes + 64);
+    /* Bytes from 0x80 up are in no class */
+    __mmask64 ascii = ~_mm512_movepi8_mask(x);
+    __m512i cls = _mm512_maskz_permutex2var_epi8(ascii, lo, x, hi);
+    auto bit = [&](uint8_t b) { return uint64_t(_mm512_test_epi8_mask(cls, _mm512_set1_epi8(char(b)))); };
+    out.space = bit(BSpace);
+    out.ident = bit(BIdent);
+    out.path = bit(BPath);
+    out.digit = bit(BDigit);
+    out.strStop = bit(BStrStop);
+    out.indStop = bit(BIndStop);
+    out.newline = bit(BNewline);
+    out.star = bit(BStar);
+}
+
+#  if defined(__clang__)
+#    pragma clang attribute pop
+#  else
+#    pragma GCC pop_options
+#  endif
+
+bool supported()
+{
+    static const bool ok = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw")
+                           && __builtin_cpu_supports("avx512vbmi") && fillTable();
+    return ok;
+}
+
+} // namespace avx512
+
 #endif
 
 #ifdef NIX_LEXER_NEON
@@ -241,6 +323,8 @@ void classify(const unsigned char * block, Masks & out)
 Classifier pickClassifier()
 {
 #ifdef NIX_LEXER_X86
+    if (avx512::supported())
+        return avx512::classify;
     if (__builtin_cpu_supports("avx2"))
         return avx2::classify;
     return sse2::classify;
@@ -258,6 +342,8 @@ std::vector<std::pair<const char *, Classifier>> allClassifiers()
     all.emplace_back("sse2", sse2::classify);
     if (__builtin_cpu_supports("avx2"))
         all.emplace_back("avx2", avx2::classify);
+    if (avx512::supported())
+        all.emplace_back("avx512", avx512::classify);
 #elif defined(NIX_LEXER_NEON)
     all.emplace_back("neon", neon::classify);
 #endif
