@@ -7,6 +7,7 @@
 #include <cassert>
 #include <bit>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -344,7 +345,15 @@ private:
     /* `adjustLoc`, run before the action of every matched rule */
     [[gnu::always_inline]] void adjust(uint32_t len)
     {
-        loc.stash();
+        /* The two offsets move as one word, loaded, stashed and stored
+           whole: storing them as two halves and loading them as one word
+           in the next rule stalls on store forwarding */
+        static_assert(offsetof(ParserLocation, endOffset) == offsetof(ParserLocation, beginOffset) + 4);
+        static_assert(
+            offsetof(ParserLocation, stashedEndOffset) == offsetof(ParserLocation, stashedBeginOffset) + 4);
+        uint64_t cur;
+        memcpy(&cur, &loc.beginOffset, 8);
+        memcpy(&loc.stashedBeginOffset, &cur, 8);
         if (docDistance == 1) [[unlikely]] {
             ParserLocation doc{ls.lastDocCommentLoc.beginOffset, 0, 0, 0};
             ParserLocation docEnd{ls.lastDocCommentLoc.endOffset, 0, 0, 0};
@@ -352,8 +361,9 @@ private:
         } else if (spec && docDistance >= specBase && docDistance <= specBase + 1) [[unlikely]]
             docCandidates.emplace_back(docDistance - specBase, ls.at(loc));
         docDistance++;
-        loc.beginOffset = loc.endOffset;
-        loc.endOffset += len;
+        uint64_t end = cur >> 32;
+        uint64_t next = end | ((end + len) & 0xffffffff) << 32;
+        memcpy(&loc.beginOffset, &next, 8);
     }
 
     void emit(Kind k, StrFlavour f = Raw, uint32_t aux = 0)
