@@ -176,38 +176,56 @@ constexpr uint64_t pack(std::string_view t)
     return w;
 }
 
-/* The keyword spelled by the `len` bytes at `p`, or ID. One word compare
-   per candidate of the right length instead of a string compare per
-   keyword */
-Kind keywordOf(const char * p, uint32_t len)
+/* A perfect hash of the keywords: the top 4 bits of the word times this
+   are different for each of them */
+constexpr uint64_t keywordMul = 0xcd613e30d8f16adf;
+
+constexpr unsigned keywordSlot(uint64_t w)
 {
-    if (len < 2 || len > 7)
+    return (w * keywordMul) >> 60;
+}
+
+struct KeywordSlot
+{
+    uint64_t word = 0;
+    Kind kind = ID;
+};
+
+constexpr std::array<KeywordSlot, 16> keywordTable = [] {
+    std::array<KeywordSlot, 16> t{};
+    std::pair<std::string_view, Kind> kws[] = {
+        {"if", IF},
+        {"then", THEN},
+        {"else", ELSE},
+        {"assert", ASSERT},
+        {"with", WITH},
+        {"let", LET},
+        {"in", IN_KW},
+        {"rec", REC},
+        {"inherit", INHERIT},
+        {"or", OR_KW},
+    };
+    for (auto [text, kind] : kws) {
+        auto & slot = t[keywordSlot(pack(text))];
+        if (slot.kind != ID)
+            throw "two keywords in one slot";
+        slot = {pack(text), kind};
+    }
+    return t;
+}();
+
+/* The keyword spelled by the `len` bytes at `p`, or ID. The text is
+   padded, so the word can be loaded whole; identifiers hold no NUL, so the
+   masked word tells the length apart too */
+[[gnu::always_inline]] inline Kind keywordOf(const char * p, uint32_t len)
+{
+    if (len - 2 > 5)
         return ID;
     uint64_t w;
-    if (len >= 4) {
-        uint32_t lo, hi;
-        memcpy(&lo, p, 4);
-        memcpy(&hi, p + len - 4, 4);
-        w = lo | (uint64_t(hi) << ((len - 4) * 8));
-    } else {
-        uint16_t lo;
-        memcpy(&lo, p, 2);
-        w = lo | (len == 3 ? uint64_t(uint8_t(p[2])) << 16 : 0);
-    }
-    switch (len) {
-    case 2:
-        return w == pack("if") ? IF : w == pack("in") ? IN_KW : w == pack("or") ? OR_KW : ID;
-    case 3:
-        return w == pack("let") ? LET : w == pack("rec") ? REC : ID;
-    case 4:
-        return w == pack("then") ? THEN : w == pack("else") ? ELSE : w == pack("with") ? WITH : ID;
-    case 6:
-        return w == pack("assert") ? ASSERT : ID;
-    case 7:
-        return w == pack("inherit") ? INHERIT : ID;
-    default:
-        return ID;
-    }
+    memcpy(&w, p, 8);
+    w &= ~uint64_t(0) >> (64 - 8 * len);
+    auto & slot = keywordTable[keywordSlot(w)];
+    return slot.word == w ? slot.kind : ID;
 }
 
 Kind charKind(unsigned char c)
