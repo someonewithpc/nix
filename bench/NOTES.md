@@ -300,7 +300,7 @@ pass
 The candidates, replaying that trace (build every set the way `addAttr`
 does, iterate each once as bindVars does, look each name up once as eval
 does) over pre-faulted arena memory, best of 7, from
-`/tmp/claude-1000/mapbench/mapbench.cc`:
+`bench/map-bench.cc`:
 
 | map | build ms | iterate ms | find ms | total ms | MB requested |
 |---|---|---|---|---|---|
@@ -352,7 +352,7 @@ Under ASan, attribute sets that fail to parse leak the `inheritFromExprs`
 vectors of their `ExprAttrs`. The arena never destroys what it holds, and
 a failed parse leaves nothing that reaches them. Bison's parser does the
 same. ASan and UBSan found nothing else in the corpus check, 6000
-generated attribute sets or 3000 fuzzed files
+attribute sets from `bench/gen-attrs.py` or 3000 fuzzed files
 
 ## Left to do
 
