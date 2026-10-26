@@ -285,6 +285,75 @@ for no gain in time; NixOS is 1.70 s and 772 MB without it, 1.60 s and
 (with that off, `hello` with two threads is 121 MB), so something the
 prefetch threads keep is worth finding
 
+### 2026-10-26 on beryllium: attribute sets, keywords, symbols
+
+The machine was on the power-saver profile, so absolute times are about 20%
+above the ones of the day before. Only compare A/B runs made together
+
+How the parser fills attribute sets, recorded from the corpus: 657k
+lookups into 143k sets, 641k of them inserts. 98.6% of the sets have 16
+names or fewer, and the biggest has 19437. Symbol ids follow interning
+order, not source order, so 39% of the inserts land before the end of the
+set. Kept sorted on every insert, a vector shifts 48M entries per corpus
+pass
+
+The candidates, replaying that trace (build every set the way `addAttr`
+does, iterate each once as bindVars does, look each name up once as eval
+does) over pre-faulted arena memory, best of 7, from
+`/tmp/claude-1000/mapbench/mapbench.cc`:
+
+| map | build ms | iterate ms | find ms | total ms | MB requested |
+|---|---|---|---|---|---|
+| `std::pmr::map` (before) | 11.99 | 3.01 | 7.04 | 22.04 | 41.0 |
+| `boost::container::flat_map` | 42.00 | 1.06 | 7.08 | 50.14 | 48.0 |
+| same, 4 entries inline (`small_vector`) | 40.12 | 1.05 | 6.85 | 48.01 | 29.9 |
+| `std::flat_map` (C++23, keys in their own array) | 23.34 | 0.96 | 7.01 | 31.31 | 42.0 |
+| `absl::btree_map` 20260817 | 16.57 | 2.33 | 6.73 | 25.63 | 51.0 |
+| `seq::flat_map` (tiered vector) | 15.52 | 2.11 | 8.88 | 26.51 | 59.3 |
+| `seq::radix_map` | 15.52 | 2.78 | 4.56 | 22.86 | 70.9 |
+| plain vector, linear lookups | 115.53 | 1.37 | 92.32 | 209.22 | 51.7 |
+| vector, appended to and sorted when the set ends | 11.95 | 0.91 | 6.92 | 19.77 | 48.0 |
+| same, keys in their own array | 16.49 | 0.91 | 6.64 | 24.04 | 57.3 |
+
+The replay alone costs 1.4 ms. A drop-in `boost::container::flat_map` in
+the real parser made lex+parse 10% slower and bindVars 8% faster
+
+`ExprAttrs::AttrDefs` is now the appended-then-sorted vector, with the part
+of the `std::map` interface the evaluator uses. While the parser builds a
+set, a lookup is a binary search of the part in order and a scan of what
+was appended since. Past √n appended entries a big set merges them in.
+Each set is sorted when its bindings end, while it is still in the cache.
+Sorting them all at the end of the parse instead cost 2% of lex+parse in
+cache misses
+
+| | before | after |
+|---|---|---|
+| corpus lex+parse | 0.250 s | 0.252 s |
+| corpus bindVars | 0.037 s | 0.034 s |
+| NixOS eval (hyperfine, 8 runs) | 1.965 s, 788 MiB | 1.936 s, 792 MiB |
+| `hello.drvPath` eval (30 runs) | 168.1 ms, 170 MiB | 166.5 ms, 170 MiB |
+
+NixOS gives the same `.drv` with Bison, the `std::map` build and this one
+
+Keywords now go through a perfect hash. The identifier's bytes are loaded
+as one word from the padded text and masked to its length. Multiplied by
+0xcd613e30d8f16adf, the top 4 bits give each of the 10 keywords its own
+slot of 16, and one compare settles it. That made lex+parse 1.2% faster
+
+The symbol cache hashed names of up to 16 bytes with up to three
+multiplies in a chain. Now each word has its own multiply and the index is
+the top bits: 0.6% faster. CRC32 would be one instruction, but the build
+targets baseline x86-64, which has no SSE4.2
+
+Copying `AttrDef` a field at a time on append, against a store-forwarding
+stall that perf shows there, gained nothing and was left out
+
+Under ASan, attribute sets that fail to parse leak the `inheritFromExprs`
+vectors of their `ExprAttrs`. The arena never destroys what it holds, and
+a failed parse leaves nothing that reaches them. Bison's parser does the
+same. ASan and UBSan found nothing else in the corpus check, 6000
+generated attribute sets or 3000 fuzzed files
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
@@ -293,6 +362,6 @@ prefetch threads keep is worth finding
 - Find what the prefetch threads keep: 38 MB for the first one on `hello`
 - Keep the lexer's location and output pointer in registers across the
   inner loop; `adjust` and `emit` load and store them every token
-- Replace the attribute `std::map` with a sorted vector: three walks
-  over every set in bindVars, and tree inserts in the parser
+- Shrink the parser's symbol cache or its entries: the probe misses
+  cache on 37% of its samples once the table outgrows L2
 - Build and test NEON under qemu-aarch64
