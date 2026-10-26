@@ -403,7 +403,154 @@ struct ExprAttrs : Expr
         }
     };
 
-    typedef std::pmr::map<Symbol, AttrDef> AttrDefs;
+    /**
+     * The attributes, sorted by symbol in one array. The parser appends to
+     * a set while it builds it and sorts it when the set ends (see
+     * `lookup`, `append` and `sort`); everything else sees it sorted
+     */
+    class AttrDefs
+    {
+    public:
+        using value_type = std::pair<Symbol, AttrDef>;
+        using allocator_type = std::pmr::polymorphic_allocator<value_type>;
+        using iterator = std::pmr::vector<value_type>::iterator;
+        using const_iterator = std::pmr::vector<value_type>::const_iterator;
+
+    private:
+        std::pmr::vector<value_type> v;
+        /* How many of the entries at the front are in order; the parser
+           appends the rest */
+        uint32_t inOrder = 0;
+
+    public:
+        AttrDefs() = default;
+
+        explicit AttrDefs(const allocator_type & alloc)
+            : v(alloc)
+        {
+        }
+
+        AttrDefs(AttrDefs && other, const allocator_type & alloc)
+            : v(std::move(other.v), alloc)
+            , inOrder(other.inOrder)
+        {
+        }
+
+        AttrDefs(AttrDefs &&) = default;
+        AttrDefs & operator=(AttrDefs &&) = default;
+
+        allocator_type get_allocator() const
+        {
+            return v.get_allocator();
+        }
+
+        iterator begin()
+        {
+            return v.begin();
+        }
+
+        iterator end()
+        {
+            return v.end();
+        }
+
+        const_iterator begin() const
+        {
+            return v.begin();
+        }
+
+        const_iterator end() const
+        {
+            return v.end();
+        }
+
+        size_t size() const
+        {
+            return v.size();
+        }
+
+        bool empty() const
+        {
+            return v.empty();
+        }
+
+        void clear()
+        {
+            v.clear();
+            inOrder = 0;
+        }
+
+        iterator find(Symbol name)
+        {
+            auto i = std::lower_bound(v.begin(), v.end(), name, [](auto & a, Symbol n) { return a.first < n; });
+            return i != v.end() && i->first == name ? i : v.end();
+        }
+
+        const_iterator find(Symbol name) const
+        {
+            return const_cast<AttrDefs *>(this)->find(name);
+        }
+
+        /**
+         * Insert in order, if `name` is not there yet
+         */
+        std::pair<iterator, bool> emplace(Symbol name, const AttrDef & def)
+        {
+            sort();
+            auto i = std::lower_bound(v.begin(), v.end(), name, [](auto & a, Symbol n) { return a.first < n; });
+            if (i != v.end() && i->first == name)
+                return {i, false};
+            i = v.emplace(i, name, def);
+            inOrder = v.size();
+            return {i, true};
+        }
+
+        /**
+         * The entry for `name` while the parser is still appending
+         */
+        AttrDef * lookup(Symbol name)
+        {
+            auto end = v.begin() + inOrder;
+            auto i = std::lower_bound(v.begin(), end, name, [](auto & a, Symbol n) { return a.first < n; });
+            if (i != end && i->first == name)
+                return &i->second;
+            for (auto j = end; j != v.end(); ++j)
+                if (j->first == name)
+                    return &j->second;
+            return nullptr;
+        }
+
+        /**
+         * Add `name`, which `lookup` did not find. True when that leaves
+         * the set out of order where it was in order before, so that the
+         * caller knows to `sort` it later
+         */
+        bool append(Symbol name, const AttrDef & def)
+        {
+            bool wasInOrder = inOrder == v.size();
+            v.emplace_back(name, def);
+            if (wasInOrder && (v.size() == 1 || v[v.size() - 2].first < name)) {
+                inOrder = v.size();
+                return false;
+            }
+            /* Merge the appended ones in once there are enough of them
+               that `lookup` would spend longer scanning them, which keeps
+               a big set at about n√n */
+            size_t tail = v.size() - inOrder;
+            if (tail > 32 && tail * tail > v.size())
+                sort();
+            return wasInOrder;
+        }
+
+        void sort()
+        {
+            if (inOrder != v.size())
+                mergeAppended();
+        }
+
+    private:
+        void mergeAppended();
+    };
     /**
      * attrs will never be null. we use std::optional so that we can call emplace() to re-initialize the value with a
      * new pmr::map using a different allocator (move assignment will copy into the old allocator)

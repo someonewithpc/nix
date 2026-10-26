@@ -632,6 +632,8 @@ class Parser
         bool more = false;
         /* Started by `runBindsTo`, which gets them back */
         bool entry = false;
+        /* Where this set's entries in `unsorted` start */
+        size_t unsortedFrom = 0;
     };
 
     /* The stacks of the state machine, kept from one parse to the next on
@@ -649,6 +651,8 @@ class Parser
         Stack<Binds> bindsStack;
         /* Where `parsePathStart` builds a path */
         std::string pathBuf;
+        /* The sets that `appendAttr` left out of order */
+        std::vector<ExprAttrs::AttrDefs *> unsorted;
         bool busy = false;
 
         /* Drop what a big file grew, which the next files would not use */
@@ -674,6 +678,8 @@ class Parser
             trimStack(inherits, [](auto & i) { return i.names.capacity(); });
             if (bindsStack.items.size() > keep)
                 bindsStack.items.clear();
+            if (unsorted.capacity() > keep)
+                unsorted = {};
         }
     };
 
@@ -720,6 +726,7 @@ public:
         , t(tk.tokens.data())
     {
         sc.busy = true;
+        st.unsorted = &sc.unsorted;
         symbols.start(st.symbols);
         if (st.imports)
             sImport = symbols.get(st.symbols, "import");
@@ -727,6 +734,9 @@ public:
 
     ~Parser()
     {
+        for (auto attrs : sc.unsorted)
+            attrs->sort();
+        sc.unsorted.clear();
         /* A parse that threw leaves its frames */
         frames.clear();
         paths.n = parts.n = indParts.n = lists.n = pipes.n = formals.n = inherits.n = bindsStack.n = 0;
@@ -1709,9 +1719,10 @@ binds: {
     ExprAttrs * attrs = nullptr;
     bool any = false;
     bool more = true;
+    size_t unsortedFrom = sc.unsorted.size();
     if (bindsCtx == Braces || bindsCtx == RecBraces)
         more = parseBindsInPieces(attrs, any);
-    bindsStack.push() = Binds{.attrs = attrs, .any = any, .ctx = bindsCtx};
+    bindsStack.push() = Binds{.attrs = attrs, .any = any, .ctx = bindsCtx, .unsortedFrom = unsortedFrom};
     if (more)
         goto bindsLoop;
     goto bindsEnd;
@@ -1766,6 +1777,11 @@ bindsEnd: {
     }
     if (!bs.attrs)
         bs.attrs = ex.add<ExprAttrs>(ex.alloc);
+    /* While the set and the ones nested in it by attribute paths are
+       still in the cache */
+    for (size_t i = bs.unsortedFrom; i < sc.unsorted.size(); i++)
+        sc.unsorted[i]->sort();
+    sc.unsorted.resize(bs.unsortedFrom);
     r = {bs.attrs, 0};
     bindsStack.pop();
     goto ret;
@@ -1864,7 +1880,8 @@ formalCheck: {
 bool Parser::runBindsTo(ExprAttrs *& attrs, bool & any, const Token * limit, std::vector<Binding> * record)
 {
     auto & bs = bindsStack.push();
-    bs = Binds{.attrs = attrs, .any = any, .limit = limit, .record = record, .entry = true};
+    bs = Binds{
+        .attrs = attrs, .any = any, .limit = limit, .record = record, .entry = true, .unsortedFrom = sc.unsorted.size()};
     run(EntryBindsTo);
     auto & done = bindsStack.top();
     attrs = done.attrs;
@@ -2048,11 +2065,10 @@ void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
 {
     if (!inherit.from) {
         for (auto & [i, iPos] : inherit.names) {
-            auto j = attrs->attrs->lower_bound(i.symbol);
-            if (j != attrs->attrs->end() && j->first == i.symbol)
-                st.dupAttr(i.symbol, iPos, j->second.pos);
-            attrs->attrs->emplace_hint(
-                j,
+            if (auto j = attrs->attrs->lookup(i.symbol))
+                st.dupAttr(i.symbol, iPos, j->pos);
+            st.appendAttr(
+                attrs,
                 i.symbol,
                 ExprAttrs::AttrDef(st.exprs.add<ExprVar>(iPos, i.symbol), iPos, ExprAttrs::AttrDef::Kind::Inherited));
         }
@@ -2064,11 +2080,10 @@ void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
     attrs->inheritFromExprs->push_back(inherit.from);
     auto fromExpr = st.exprs.add<ExprInheritFrom>(at(inherit.fromBegin), attrs->inheritFromExprs->size() - 1);
     for (auto & [i, iPos] : inherit.names) {
-        auto j = attrs->attrs->lower_bound(i.symbol);
-        if (j != attrs->attrs->end() && j->first == i.symbol)
-            st.dupAttr(i.symbol, iPos, j->second.pos);
-        attrs->attrs->emplace_hint(
-            j,
+        if (auto j = attrs->attrs->lookup(i.symbol))
+            st.dupAttr(i.symbol, iPos, j->pos);
+        st.appendAttr(
+            attrs,
             i.symbol,
             ExprAttrs::AttrDef(
                 st.exprs.add<ExprSelect>(st.exprs.alloc, iPos, fromExpr, i.symbol),

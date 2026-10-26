@@ -471,6 +471,36 @@ ExprAttrs::bindInheritSources(EvalState & es, const std::shared_ptr<const Static
     return inner;
 }
 
+void ExprAttrs::AttrDefs::mergeAppended()
+{
+    /* Most sets are small: shift each appended one into place */
+    if (v.size() <= 32) {
+        for (size_t i = inOrder; i < v.size(); i++) {
+            auto x = v[i];
+            size_t j = i;
+            for (; j > 0 && x.first < v[j - 1].first; j--)
+                v[j] = v[j - 1];
+            v[j] = x;
+        }
+        inOrder = v.size();
+        return;
+    }
+    auto mid = v.begin() + inOrder;
+    std::sort(mid, v.end(), [](auto & a, auto & b) { return a.first < b.first; });
+    /* Back to front, so that only the appended ones need a copy */
+    thread_local std::vector<value_type> tail;
+    tail.assign(mid, v.end());
+    size_t a = inOrder, b = tail.size(), k = v.size();
+    while (b > 0)
+        if (a > 0 && tail[b - 1].first < v[a - 1].first)
+            v[--k] = v[--a];
+        else
+            v[--k] = tail[--b];
+    if (tail.capacity() > 4096)
+        tail = {};
+    inOrder = v.size();
+}
+
 void ExprAttrs::moveDataToAllocator(std::pmr::polymorphic_allocator<char> & alloc)
 {
     /* What the parser made is there already */

@@ -177,7 +177,11 @@ struct ParserState
     /* Where to note the paths that are imported by name, as in
        `import ./foo.nix`, if anywhere */
     std::vector<SourcePath> * imports = nullptr;
+    /* Where `appendAttr` notes the sets it leaves out of order, for the
+       parser to sort when each set ends */
+    std::vector<ExprAttrs::AttrDefs *> * unsorted = nullptr;
 
+    void appendAttr(ExprAttrs * attrs, Symbol name, const ExprAttrs::AttrDef & def);
     void dupAttr(const AttrSelectionPath & attrPath, const PosIdx pos, const PosIdx prevPos);
     void dupAttr(Symbol attr, const PosIdx pos, const PosIdx prevPos);
     void addAttr(
@@ -198,6 +202,12 @@ inline void ParserState::dupAttr(const AttrSelectionPath & attrPath, const PosId
         {.msg = HintFmt(
              "attribute '%1%' already defined at %2%", showAttrSelectionPath(symbols, attrPath), positions[prevPos]),
          .pos = positions[pos]});
+}
+
+inline void ParserState::appendAttr(ExprAttrs * attrs, Symbol name, const ExprAttrs::AttrDef & def)
+{
+    if (attrs->attrs->append(name, def))
+        unsorted->push_back(&*attrs->attrs);
 }
 
 inline void ParserState::dupAttr(Symbol attr, const PosIdx pos, const PosIdx prevPos)
@@ -223,17 +233,15 @@ inline void ParserState::addAttr(
     for (i = attrPath.begin(); i + 1 < attrPath.end(); i++) {
         ExprAttrs * nested;
         if (i->symbol) {
-            /* One walk down the tree, which the insert takes as its hint */
-            ExprAttrs::AttrDefs::iterator j = attrs->attrs->lower_bound(i->symbol);
-            if (j != attrs->attrs->end() && j->first == i->symbol) {
-                nested = dynamic_cast<ExprAttrs *>(j->second.e);
+            if (auto j = attrs->attrs->lookup(i->symbol)) {
+                nested = dynamic_cast<ExprAttrs *>(j->e);
                 if (!nested) {
                     attrPath.erase(i + 1, attrPath.end());
-                    dupAttr(attrPath, pos, j->second.pos);
+                    dupAttr(attrPath, pos, j->pos);
                 }
             } else {
                 nested = exprs.add<ExprAttrs>(exprs.alloc);
-                attrs->attrs->emplace_hint(j, i->symbol, ExprAttrs::AttrDef(nested, pos));
+                appendAttr(attrs, i->symbol, ExprAttrs::AttrDef(nested, pos));
             }
         } else {
             nested = exprs.add<ExprAttrs>(exprs.alloc);
@@ -266,14 +274,13 @@ inline void ParserState::addAttr(
 inline void
 ParserState::addAttr(ExprAttrs * attrs, AttrSelectionPath & attrPath, const Symbol & symbol, ExprAttrs::AttrDef && def)
 {
-    ExprAttrs::AttrDefs::iterator j = attrs->attrs->lower_bound(symbol);
-    if (j != attrs->attrs->end() && j->first == symbol) {
+    if (auto j = attrs->attrs->lookup(symbol)) {
         // This attr path is already defined. However, if both
         // e and the expr pointed by the attr path are two attribute sets,
         // we want to merge them.
         // Otherwise, throw an error.
         auto ae = dynamic_cast<ExprAttrs *>(def.e);
-        auto jAttrs = dynamic_cast<ExprAttrs *>(j->second.e);
+        auto jAttrs = dynamic_cast<ExprAttrs *>(j->e);
 
         // N.B. In a world in which we are less bound by our past mistakes, we
         // would also test that jAttrs and ae are not recursive. The effect of
@@ -283,6 +290,8 @@ ParserState::addAttr(ExprAttrs * attrs, AttrSelectionPath & attrPath, const Symb
         if (jAttrs && ae) {
             if (ae->inheritFromExprs && !jAttrs->inheritFromExprs)
                 jAttrs->inheritFromExprs = std::make_unique<std::pmr::vector<Expr *>>(exprs.alloc);
+            /* In order, as the errors for duplicates have always come */
+            ae->attrs->sort();
             for (auto & ad : *ae->attrs) {
                 if (ad.second.kind == ExprAttrs::AttrDef::Kind::InheritedFrom) {
                     auto & sel = dynamic_cast<ExprSelect &>(*ad.second.e);
@@ -307,11 +316,11 @@ ParserState::addAttr(ExprAttrs * attrs, AttrSelectionPath & attrPath, const Symb
                 ae->inheritFromExprs = nullptr;
             }
         } else {
-            dupAttr(attrPath, def.pos, j->second.pos);
+            dupAttr(attrPath, def.pos, j->pos);
         }
     } else {
         // This attr path is not defined. Let's create it.
-        attrs->attrs->emplace_hint(j, symbol, def);
+        appendAttr(attrs, symbol, def);
         def.e->setName(symbol);
     }
 }
