@@ -192,14 +192,36 @@ class SymbolCache
         return h ^ (h >> 32);
     }
 
+    /* For names of up to 16 bytes, as two zero-padded words: two
+       multiplies that do not wait on each other. The table indexes by the
+       top bits, which depend on every bit of the words */
+    static uint64_t hashWords(uint64_t w0, uint64_t w1)
+    {
+        return (w0 * 0x9e3779b97f4a7c15ull) ^ (w1 * 0xc2b2ae3d27d4eb4full);
+    }
+
+    /* The low `n` bytes, for `n` up to 8 */
+    static uint64_t lowBytes(uint64_t w, size_t n)
+    {
+        return n >= 8 ? w : w & ((uint64_t(1) << (8 * n)) - 1);
+    }
+
+    unsigned shift = 64 - 12;
+
+    size_t slot(uint64_t h) const
+    {
+        return h >> shift;
+    }
+
     void grow()
     {
         std::vector<Entry> old(entries.size() * 2);
         old.swap(entries);
+        shift--;
         size_t mask = entries.size() - 1;
         for (auto & e : old)
             if (e.sym) {
-                size_t i = e.hash & mask;
+                size_t i = slot(e.hash);
                 while (entries[i].sym)
                     i = (i + 1) & mask;
                 entries[i] = e;
@@ -224,6 +246,32 @@ class SymbolCache
         return sym;
     }
 
+    Symbol getShort(SymbolTable & symbols, std::string_view s, uint64_t w0, uint64_t w1)
+    {
+        uint64_t h = hashWords(w0, w1);
+        size_t mask = entries.size() - 1;
+        size_t i = slot(h);
+        for (; entries[i].sym; i = (i + 1) & mask) {
+            auto & e = entries[i];
+            if (e.hash == h && e.len == s.size() && load64(e.text) == w0 && load64(e.text + 8) == w1)
+                return e.sym;
+        }
+        return insert(symbols, s, h, i);
+    }
+
+    Symbol getLong(SymbolTable & symbols, std::string_view s)
+    {
+        uint64_t h = hashOf(s.data(), s.size());
+        size_t mask = entries.size() - 1;
+        size_t i = slot(h);
+        for (; entries[i].sym; i = (i + 1) & mask) {
+            auto & e = entries[i];
+            if (e.hash == h && e.len == s.size() && memcmp(e.ptr, s.data(), s.size()) == 0)
+                return e.sym;
+        }
+        return insert(symbols, s, h, i);
+    }
+
 public:
     /**
      * Free the entries; the next `start` makes new ones
@@ -243,41 +291,33 @@ public:
         if (serial == symbols.serial)
             return;
         entries.assign(4096, Entry{});
+        shift = 64 - 12;
         used = 0;
         serial = symbols.serial;
     }
 
     Symbol get(SymbolTable & symbols, std::string_view s)
     {
-        if (s.size() <= inlineLen) {
-            /* The name as the zero-padded words the entry keeps */
-            size_t n = s.size();
-            uint64_t w0 = loadTail(s.data(), std::min<size_t>(n, 8));
-            uint64_t w1 = n > 8 ? loadTail(s.data() + 8, n - 8) : 0;
-            uint64_t h = n * 0x9e3779b97f4a7c15ull;
-            if (n)
-                h = mix(h, w0);
-            if (n > 8)
-                h = mix(h, w1);
-            h ^= h >> 32;
-            size_t mask = entries.size() - 1;
-            size_t i = h & mask;
-            for (; entries[i].sym; i = (i + 1) & mask) {
-                auto & e = entries[i];
-                if (e.hash == h && e.len == n && load64(e.text) == w0 && load64(e.text + 8) == w1)
-                    return e.sym;
-            }
-            return insert(symbols, s, h, i);
-        }
-        uint64_t h = hashOf(s.data(), s.size());
-        size_t mask = entries.size() - 1;
-        size_t i = h & mask;
-        for (; entries[i].sym; i = (i + 1) & mask) {
-            auto & e = entries[i];
-            if (e.hash == h && e.len == s.size() && memcmp(e.ptr, s.data(), s.size()) == 0)
-                return e.sym;
-        }
-        return insert(symbols, s, h, i);
+        size_t n = s.size();
+        if (n > inlineLen)
+            return getLong(symbols, s);
+        uint64_t w0 = loadTail(s.data(), std::min<size_t>(n, 8));
+        uint64_t w1 = n > 8 ? loadTail(s.data() + 8, n - 8) : 0;
+        return getShort(symbols, s, w0, w1);
+    }
+
+    /**
+     * `get` for a name in the parser's text, which has padding after it to
+     * load 16 bytes from anywhere in it
+     */
+    Symbol getInText(SymbolTable & symbols, std::string_view s)
+    {
+        size_t n = s.size();
+        if (n > inlineLen)
+            return getLong(symbols, s);
+        uint64_t w0 = lowBytes(load64(s.data()), n);
+        uint64_t w1 = n > 8 ? lowBytes(load64(s.data() + 8), n - 8) : 0;
+        return getShort(symbols, s, w0, w1);
     }
 };
 
@@ -450,7 +490,7 @@ class Parser
 
     Symbol sym(const Token & tok)
     {
-        return symbols.get(st.symbols, raw(tok));
+        return symbols.getInText(st.symbols, raw(tok));
     }
 
     void setDocPosition(ExprLambda * lambda, uint32_t begin)
