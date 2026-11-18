@@ -18,7 +18,8 @@ typedef boost::unordered_flat_map<PosIdx, DocComment, std::hash<PosIdx>> DocComm
  *
  * With `imports` set, the paths of `import <path literal>` calls and the
  * `.nix` path literals in lists are added to it. With `quiet` set, the parse throws `ParseAbandoned`
- * instead of printing a warning
+ * instead of printing a warning. With `local` set, names that it does not
+ * count as known get local symbols, which `internLocalSymbols` replaces
  */
 Expr * parseExprFromBuf(
     ParseBuffer & text,
@@ -31,7 +32,14 @@ Expr * parseExprFromBuf(
     DocCommentMap & docComments,
     const ref<SourceAccessor> rootFS,
     std::vector<SourcePath> * imports = nullptr,
-    bool quiet = false);
+    bool quiet = false,
+    LocalSymbols * local = nullptr);
+
+/**
+ * Intern the names of a parse with `local` into `symbols` and give `e`
+ * their symbols, on the thread that a serial parse would have run on
+ */
+void internLocalSymbols(Expr * e, const LocalSymbols & local, SymbolTable & symbols);
 
 /**
  * Parse REPL bindings from a buffer

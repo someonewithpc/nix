@@ -228,51 +228,78 @@ class SymbolCache
             }
     }
 
-    [[gnu::noinline]] Symbol insert(SymbolTable & symbols, std::string_view s, uint64_t h, size_t i)
+public:
+    /* A name with its hash, and for names of up to `inlineLen` bytes its
+       bytes as two zero-padded words */
+    struct Key
     {
-        Symbol sym = symbols.create(s);
-        auto & e = entries[i];
-        e.hash = h;
+        std::string_view s;
+        uint64_t h, w0 = 0, w1 = 0;
+    };
+
+    static Key key(std::string_view s)
+    {
+        size_t n = s.size();
+        if (n > inlineLen)
+            return {s, hashOf(s.data(), n)};
+        uint64_t w0 = loadTail(s.data(), std::min<size_t>(n, 8));
+        uint64_t w1 = n > 8 ? loadTail(s.data() + 8, n - 8) : 0;
+        return {s, hashWords(w0, w1), w0, w1};
+    }
+
+    /**
+     * `key` for a name in the parser's text, which has padding after it to
+     * load 16 bytes from anywhere in it
+     */
+    static Key keyInText(std::string_view s)
+    {
+        size_t n = s.size();
+        if (n > inlineLen)
+            return {s, hashOf(s.data(), n)};
+        uint64_t w0 = lowBytes(load64(s.data()), n);
+        uint64_t w1 = n > 8 ? lowBytes(load64(s.data() + 8), n - 8) : 0;
+        return {s, hashWords(w0, w1), w0, w1};
+    }
+
+    /**
+     * The symbol for `k`, or none and the slot where `put` adds it
+     */
+    [[gnu::always_inline]] Symbol find(const Key & k, size_t & slot) const
+    {
+        size_t mask = entries.size() - 1;
+        size_t i = this->slot(k.h);
+        size_t n = k.s.size();
+        for (; entries[i].sym; i = (i + 1) & mask) {
+            auto & e = entries[i];
+            if (e.hash != k.h || e.len != n)
+                continue;
+            if (n <= inlineLen ? load64(e.text) == k.w0 && load64(e.text + 8) == k.w1
+                               : memcmp(e.ptr, k.s.data(), n) == 0)
+                return e.sym;
+        }
+        slot = i;
+        return {};
+    }
+
+    /**
+     * Add what `find` did not find. `stable` is a copy of the name that
+     * outlives the cache, needed for names longer than `inlineLen`
+     */
+    [[gnu::noinline]] void put(const Key & k, size_t slot, Symbol sym, const char * stable)
+    {
+        auto & e = entries[slot];
+        e.hash = k.h;
         e.sym = sym;
-        e.len = uint32_t(s.size());
-        if (s.size() <= inlineLen) {
-            memset(e.text, 0, inlineLen);
-            memcpy(e.text, s.data(), s.size());
+        e.len = uint32_t(k.s.size());
+        if (k.s.size() <= inlineLen) {
+            memcpy(e.text, &k.w0, 8);
+            memcpy(e.text + 8, &k.w1, 8);
         } else
-            /* The table's copy, which lives as long as the table */
-            e.ptr = std::string_view(symbols[sym]).data();
+            e.ptr = stable;
         if (++used * 2 > entries.size())
             grow();
-        return sym;
     }
 
-    Symbol getShort(SymbolTable & symbols, std::string_view s, uint64_t w0, uint64_t w1)
-    {
-        uint64_t h = hashWords(w0, w1);
-        size_t mask = entries.size() - 1;
-        size_t i = slot(h);
-        for (; entries[i].sym; i = (i + 1) & mask) {
-            auto & e = entries[i];
-            if (e.hash == h && e.len == s.size() && load64(e.text) == w0 && load64(e.text + 8) == w1)
-                return e.sym;
-        }
-        return insert(symbols, s, h, i);
-    }
-
-    Symbol getLong(SymbolTable & symbols, std::string_view s)
-    {
-        uint64_t h = hashOf(s.data(), s.size());
-        size_t mask = entries.size() - 1;
-        size_t i = slot(h);
-        for (; entries[i].sym; i = (i + 1) & mask) {
-            auto & e = entries[i];
-            if (e.hash == h && e.len == s.size() && memcmp(e.ptr, s.data(), s.size()) == 0)
-                return e.sym;
-        }
-        return insert(symbols, s, h, i);
-    }
-
-public:
     /**
      * Free the entries; the next `start` makes new ones
      */
@@ -290,34 +317,35 @@ public:
     {
         if (serial == symbols.serial)
             return;
-        entries.assign(4096, Entry{});
-        shift = 64 - 12;
-        used = 0;
+        reset(4096);
         serial = symbols.serial;
     }
 
-    Symbol get(SymbolTable & symbols, std::string_view s)
+    /**
+     * Empty, with room for `n` entries, `n` a power of two
+     */
+    void reset(size_t n)
     {
-        size_t n = s.size();
-        if (n > inlineLen)
-            return getLong(symbols, s);
-        uint64_t w0 = loadTail(s.data(), std::min<size_t>(n, 8));
-        uint64_t w1 = n > 8 ? loadTail(s.data() + 8, n - 8) : 0;
-        return getShort(symbols, s, w0, w1);
+        entries.assign(n, Entry{});
+        shift = 64 - std::countr_zero(n);
+        used = 0;
+        serial = 0;
     }
 
-    /**
-     * `get` for a name in the parser's text, which has padding after it to
-     * load 16 bytes from anywhere in it
-     */
-    Symbol getInText(SymbolTable & symbols, std::string_view s)
+    [[gnu::noinline]] Symbol insert(SymbolTable & symbols, const Key & k, size_t slot)
     {
-        size_t n = s.size();
-        if (n > inlineLen)
-            return getLong(symbols, s);
-        uint64_t w0 = lowBytes(load64(s.data()), n);
-        uint64_t w1 = n > 8 ? lowBytes(load64(s.data() + 8), n - 8) : 0;
-        return getShort(symbols, s, w0, w1);
+        Symbol sym = symbols.create(k.s);
+        /* The table's copy, which lives as long as the table */
+        put(k, slot, sym, std::string_view(symbols[sym]).data());
+        return sym;
+    }
+
+    [[gnu::always_inline]] Symbol get(SymbolTable & symbols, const Key & k)
+    {
+        size_t slot;
+        if (auto sym = find(k, slot))
+            return sym;
+        return insert(symbols, k, slot);
     }
 };
 
@@ -488,9 +516,44 @@ class Parser
         }
     }
 
+    /* For names that go into `st.local`, which only this parser adds to */
+    std::unique_ptr<SymbolCache> localCache;
+
+    [[gnu::noinline]] Symbol localSym(const SymbolCache::Key & k)
+    {
+        auto & local = *st.local;
+        size_t slot, localSlot;
+        auto sym = symbols.find(k, slot);
+        if (sym && local.isKnown(sym))
+            return sym;
+        if (auto l = localCache->find(k, localSlot))
+            return l;
+        if (!sym) {
+            sym = st.symbols.lookup(k.s);
+            if (sym) {
+                symbols.put(k, slot, sym, std::string_view(st.symbols[sym]).data());
+                if (local.isKnown(sym))
+                    return sym;
+            }
+        }
+        auto l = local.add(k.s);
+        localCache->put(k, localSlot, l, local[l].data());
+        return l;
+    }
+
+    Symbol intern(const SymbolCache::Key & k)
+    {
+        return st.local ? localSym(k) : symbols.get(st.symbols, k);
+    }
+
+    Symbol intern(std::string_view s)
+    {
+        return intern(SymbolCache::key(s));
+    }
+
     Symbol sym(const Token & tok)
     {
-        return symbols.getInText(st.symbols, raw(tok));
+        return intern(SymbolCache::keyInText(raw(tok)));
     }
 
     void setDocPosition(ExprLambda * lambda, uint32_t begin)
@@ -542,7 +605,7 @@ class Parser
     {
         x.visit(
             overloaded{
-                [&](std::string_view str) { path.emplace_back(st.symbols.create(str)); },
+                [&](std::string_view str) { path.emplace_back(intern(str)); },
                 [&](Expr * expr) { path.emplace_back(expr); }});
     }
 
@@ -755,6 +818,7 @@ class Parser
     bool runBindsTo(ExprAttrs *& attrs, bool & any, const Token * limit, std::vector<Binding> * record);
     bool parseBindsInPieces(ExprAttrs *& attrs, bool & any);
     void addInherit(ExprAttrs * attrs, Inherit && inherit);
+    void remapBinding(Binding & b, const SymbolRemap & remap);
     void findBigSets();
 
 public:
@@ -768,8 +832,13 @@ public:
         sc.busy = true;
         st.unsorted = &sc.unsorted;
         symbols.start(st.symbols);
+        if (st.local) {
+            localCache = std::make_unique<SymbolCache>();
+            localCache->reset(256);
+        }
+        /* A builtin, so the table has it and interning it adds nothing */
         if (st.imports)
-            sImport = symbols.get(st.symbols, "import");
+            sImport = intern("import");
     }
 
     ~Parser()
@@ -1246,7 +1315,7 @@ ret: {
         auto & names = inherits.top().names;
         x.visit(
             overloaded{
-                [&](std::string_view str) { names.emplace_back(st.symbols.create(str), at(tok.begin)); },
+                [&](std::string_view str) { names.emplace_back(intern(str), at(tok.begin)); },
                 [&](Expr * expr) {
                     throw ParseError(
                         {.msg = HintFmt("dynamic attributes not allowed in inherit"),
@@ -1565,7 +1634,7 @@ attrPathLoop: {
         break;
     case OR_KW:
         next();
-        path.emplace_back(st.symbols.create("or"));
+        path.emplace_back(intern("or"));
         break;
     case QUOTE:
         next();
@@ -1837,7 +1906,7 @@ inheritNames: {
     }
     if (tok.kind == OR_KW) {
         next();
-        names.emplace_back(st.symbols.create("or"), at(tok.begin));
+        names.emplace_back(intern("or"), at(tok.begin));
         goto inheritNames;
     }
     if (tok.kind == QUOTE) {
@@ -2012,8 +2081,15 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
         std::vector<Binding> bindings;
         std::vector<std::pair<PosIdx, DocComment>> docs;
         std::vector<SourcePath> imports;
+        std::unique_ptr<LocalSymbols> names;
         bool ok = false;
     };
+    /* The table's symbols that a piece may use as they are. When this
+       parse interns into the table, any symbol a piece finds there is the
+       one this parse uses for that name, and pieces add none. Under a
+       local parse, the bound keeps the pieces and the parse agreeing on
+       which names are local */
+    uint32_t known = st.local ? st.local->known : LocalSymbols::localBit;
 
     std::vector<Piece> results(k);
     std::exception_ptr error;
@@ -2046,6 +2122,8 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
                 ParserState pst = st;
                 pst.deferredDocs = &r.docs;
                 pst.quiet = true;
+                r.names = std::make_unique<LocalSymbols>(known);
+                pst.local = r.names.get();
                 if (st.imports)
                     pst.imports = &r.imports;
                 Parser p(pst, ls, text, tk);
@@ -2079,6 +2157,13 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
                 more = runBindsTo(attrs, any, base + cuts[i + 1], nullptr);
             continue;
         }
+        /* Where a serial parse would have interned the piece's names */
+        auto to = r.names->intern([&](std::string_view name) { return intern(name); });
+        if (!to.empty()) {
+            SymbolRemap remap{to};
+            for (auto & b : r.bindings)
+                remapBinding(b, remap);
+        }
         addDocs(r.docs);
         if (st.imports)
             st.imports->insert(st.imports->end(), r.imports.begin(), r.imports.end());
@@ -2099,6 +2184,26 @@ bool Parser::parseBindsInPieces(ExprAttrs *& attrs, bool & any)
         t = base + cuts[i + 1];
     }
     return more;
+}
+
+void Parser::remapBinding(Binding & b, const SymbolRemap & remap)
+{
+    auto remapName = [&](AttrName & i) {
+        if (i.symbol)
+            i.symbol = remap(i.symbol);
+        else
+            i.expr->remapSymbols(remap);
+    };
+    for (auto & i : b.path)
+        remapName(i);
+    if (b.e.e)
+        b.e.e->remapSymbols(remap);
+    if (b.inherit) {
+        if (b.inherit->from)
+            b.inherit->from->remapSymbols(remap);
+        for (auto & [i, pos] : b.inherit->names)
+            remapName(i);
+    }
 }
 
 void Parser::addInherit(ExprAttrs * attrs, Inherit && inherit)
@@ -2144,7 +2249,8 @@ Expr * parse(
     const ref<SourceAccessor> rootFS,
     bool repl,
     std::vector<SourcePath> * imports,
-    bool quiet)
+    bool quiet,
+    LocalSymbols * local)
 {
     char * text = buf.data();
     size_t length = buf.size();
@@ -2164,6 +2270,7 @@ Expr * parse(
         .settings = settings,
         .quiet = quiet,
         .imports = imports,
+        .local = local,
     };
 
     auto tokens = lexer::lex(text, length, lexerState, repl);
@@ -2185,9 +2292,20 @@ Expr * parseExprFromBuf(
     DocCommentMap & docComments,
     const ref<SourceAccessor> rootFS,
     std::vector<SourcePath> * imports,
-    bool quiet)
+    bool quiet,
+    LocalSymbols * local)
 {
-    return parse(text, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, false, imports, quiet);
+    return parse(
+        text, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, false, imports, quiet, local);
+}
+
+void internLocalSymbols(Expr * e, const LocalSymbols & local, SymbolTable & symbols)
+{
+    if (!local.size())
+        return;
+    symbolCache.start(symbols);
+    auto to = local.intern([&](std::string_view s) { return symbolCache.get(symbols, SymbolCache::key(s)); });
+    e->remapSymbols(SymbolRemap{to});
 }
 
 ExprAttrs * parseReplBindingsFromBuf(
@@ -2201,8 +2319,8 @@ ExprAttrs * parseReplBindingsFromBuf(
     DocCommentMap & docComments,
     const ref<SourceAccessor> rootFS)
 {
-    auto result =
-        parse(text, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, true, nullptr, false);
+    auto result = parse(
+        text, origin, basePath, exprs, symbols, settings, positions, docComments, rootFS, true, nullptr, false, nullptr);
     assert(result);
     auto bindings = dynamic_cast<ExprAttrs *>(result);
     assert(bindings);

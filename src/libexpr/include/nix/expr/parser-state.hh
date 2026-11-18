@@ -177,6 +177,10 @@ struct ParserState
     /* Where to note the paths that are imported by name, as in
        `import ./foo.nix`, if anywhere */
     std::vector<SourcePath> * imports = nullptr;
+    /* Where names the table does not know go, when parsing on another
+       thread. Their symbols mean nothing to `symbols`, so errors throw
+       `ParseAbandoned` and a parse in the right order reports them */
+    LocalSymbols * local = nullptr;
     /* Where `appendAttr` notes the sets it leaves out of order, for the
        parser to sort when each set ends */
     std::vector<ExprAttrs::AttrDefs *> * unsorted = nullptr;
@@ -198,6 +202,8 @@ struct ParserState
 
 inline void ParserState::dupAttr(const AttrSelectionPath & attrPath, const PosIdx pos, const PosIdx prevPos)
 {
+    if (local)
+        throw ParseAbandoned();
     throw ParseError(
         {.msg = HintFmt(
              "attribute '%1%' already defined at %2%", showAttrSelectionPath(symbols, attrPath), positions[prevPos]),
@@ -212,6 +218,8 @@ inline void ParserState::appendAttr(ExprAttrs * attrs, Symbol name, const ExprAt
 
 inline void ParserState::dupAttr(Symbol attr, const PosIdx pos, const PosIdx prevPos)
 {
+    if (local)
+        throw ParseAbandoned();
     throw ParseError(
         {.msg = HintFmt("attribute '%1%' already defined at %2%", symbols[attr], positions[prevPos]),
          .pos = positions[pos]});
@@ -338,6 +346,8 @@ inline void ParserState::validateFormals(FormalsBuilder & formals, PosIdx pos, S
         std::pair thisDup{formals.formals[i].name, formals.formals[i + 1].pos};
         duplicate = std::min(thisDup, duplicate.value_or(thisDup));
     }
+    if ((duplicate || (arg && formals.has(arg))) && local)
+        throw ParseAbandoned();
     if (duplicate)
         throw ParseError(
             {.msg = HintFmt("duplicate formal function argument '%1%'", symbols[duplicate->first]),
