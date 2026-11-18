@@ -94,13 +94,15 @@ querySubstitutablePathInfosAsync(Store & store, const StorePathCAMap & paths, Su
         co_return;
 
     co_await forEachAsync(paths, [&store, &infos](auto path) -> asio::awaitable<void> {
-        std::optional<Error> lastStoresException = std::nullopt;
-        for (auto & sub : getDefaultSubstituters()) {
-            if (lastStoresException.has_value()) {
-                logError(lastStoresException->info());
-                lastStoresException.reset();
-            }
+        auto subList = getDefaultSubstituters();
+        std::vector<ref<Store>> subs(subList.begin(), subList.end());
 
+        /* Ask all substituters at once, then take the answers in priority
+           order, so that a path missing from several caches costs the
+           slowest lookup rather than the sum of them. */
+        std::vector<std::optional<StorePath>> subPaths;
+        std::vector<size_t> asked;
+        for (auto & sub : subs) {
             auto subPath(path.first);
 
             // Recompute store path so that we can use a different store root.
@@ -115,18 +117,41 @@ querySubstitutablePathInfosAsync(Store & store, const StorePathCAMap & paths, Su
                         store.printStorePath(path.first),
                         sub->printStorePath(subPath),
                         sub->config.getHumanReadableURI());
-            } else if (sub->storeDir != store.storeDir)
+            } else if (sub->storeDir != store.storeDir) {
+                subPaths.push_back(std::nullopt);
                 continue;
+            }
 
             debug(
                 "checking substituter '%s' for path '%s'",
                 sub->config.getHumanReadableURI(),
                 sub->printStorePath(subPath));
+            asked.push_back(subPaths.size());
+            subPaths.push_back(std::move(subPath));
+        }
+
+        std::vector<std::optional<std::future<ref<const ValidPathInfo>>>> answers(subs.size());
+        co_await forEachAsync(asked, [&](size_t i) -> asio::awaitable<void> {
+            answers[i] = co_await callbackToAwaitable<ref<const ValidPathInfo>>(
+                [subPath = *subPaths[i], &sub = subs[i]](Callback<ref<const ValidPathInfo>> cb) {
+                    sub->queryPathInfo(subPath, std::move(cb));
+                },
+                asio::use_awaitable);
+        });
+
+        std::optional<Error> lastStoresException = std::nullopt;
+        for (size_t i = 0; i < subs.size(); ++i) {
+            if (lastStoresException.has_value()) {
+                logError(lastStoresException->info());
+                lastStoresException.reset();
+            }
+
+            if (!subPaths[i])
+                continue;
+
+            auto & sub = subs[i];
             try {
-                auto info = co_await callbackToAwaitable<ref<const ValidPathInfo>>(
-                    [subPath, &sub](Callback<ref<const ValidPathInfo>> cb) {
-                        sub->queryPathInfo(subPath, std::move(cb));
-                    });
+                auto info = answers[i]->get();
 
                 if (sub->storeDir != store.storeDir && !(info->isContentAddressed(*sub) && info->references.empty()))
                     continue;
