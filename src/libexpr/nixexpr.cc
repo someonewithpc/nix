@@ -720,6 +720,119 @@ void ExprPos::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & 
         es.exprEnvs.insert(std::make_pair(this, env));
 }
 
+/* Replacing local symbols. */
+
+void ExprVar::remapSymbols(const SymbolRemap & remap)
+{
+    name = remap(name);
+}
+
+static void remapAttrPath(std::span<AttrName> attrPath, const SymbolRemap & remap)
+{
+    for (auto & i : attrPath)
+        if (i.symbol)
+            i.symbol = remap(i.symbol);
+        else
+            i.expr->remapSymbols(remap);
+}
+
+void ExprSelect::remapSymbols(const SymbolRemap & remap)
+{
+    e->remapSymbols(remap);
+    if (def)
+        def->remapSymbols(remap);
+    remapAttrPath({attrPathStart, nAttrPath}, remap);
+}
+
+void ExprOpHasAttr::remapSymbols(const SymbolRemap & remap)
+{
+    e->remapSymbols(remap);
+    remapAttrPath(attrPath, remap);
+}
+
+void ExprAttrs::remapSymbols(const SymbolRemap & remap)
+{
+    for (auto & [name, def] : *attrs) {
+        name = remap(name);
+        def.e->remapSymbols(remap);
+    }
+    attrs->resort();
+    for (auto & i : *dynamicAttrs) {
+        i.nameExpr->remapSymbols(remap);
+        i.valueExpr->remapSymbols(remap);
+    }
+    if (inheritFromExprs)
+        for (auto e : *inheritFromExprs)
+            e->remapSymbols(remap);
+}
+
+void ExprList::remapSymbols(const SymbolRemap & remap)
+{
+    for (auto e : elems)
+        e->remapSymbols(remap);
+}
+
+void ExprLambda::remapSymbols(const SymbolRemap & remap)
+{
+    name = remap(name);
+    arg = remap(arg);
+    if (hasFormals) {
+        std::span<Formal> formals{formalsStart, nFormals};
+        for (auto & i : formals) {
+            i.name = remap(i.name);
+            if (i.def)
+                i.def->remapSymbols(remap);
+        }
+        auto less = [](const Formal & a, const Formal & b) { return a.name < b.name; };
+        if (!std::is_sorted(formals.begin(), formals.end(), less))
+            std::sort(formals.begin(), formals.end(), less);
+    }
+    body->remapSymbols(remap);
+}
+
+void ExprCall::remapSymbols(const SymbolRemap & remap)
+{
+    fun->remapSymbols(remap);
+    for (auto e : *args)
+        e->remapSymbols(remap);
+}
+
+void ExprLet::remapSymbols(const SymbolRemap & remap)
+{
+    attrs->remapSymbols(remap);
+    body->remapSymbols(remap);
+}
+
+void ExprWith::remapSymbols(const SymbolRemap & remap)
+{
+    attrs->remapSymbols(remap);
+    body->remapSymbols(remap);
+}
+
+void ExprIf::remapSymbols(const SymbolRemap & remap)
+{
+    cond->remapSymbols(remap);
+    then->remapSymbols(remap);
+    else_->remapSymbols(remap);
+}
+
+void ExprAssert::remapSymbols(const SymbolRemap & remap)
+{
+    cond->remapSymbols(remap);
+    body->remapSymbols(remap);
+}
+
+void ExprOpNot::remapSymbols(const SymbolRemap & remap)
+{
+    e->remapSymbols(remap);
+}
+
+void ExprConcatStrings::remapSymbols(const SymbolRemap & remap)
+{
+    for (auto & [pos, e] : es)
+        e->remapSymbols(remap);
+}
+
 /* Storing function names. */
 
 void Expr::setName(Symbol name) {}

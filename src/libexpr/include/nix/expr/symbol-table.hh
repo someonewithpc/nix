@@ -2,7 +2,10 @@
 ///@file
 
 #include <atomic>
+#include <cstring>
 #include <memory_resource>
+#include <span>
+#include <vector>
 #include "nix/expr/value.hh"
 #include "nix/expr/static-string-data.hh"
 #include "nix/util/chunked-vector.hh"
@@ -42,6 +45,7 @@ class Symbol
     friend class SymbolStr;
     friend class SymbolTable;
     friend class StaticSymbolTable;
+    friend class LocalSymbols;
 
 private:
     uint32_t id;
@@ -307,6 +311,16 @@ public:
         return res;
     }
 
+    /**
+     * The symbol for `s` if the table has it, without adding it
+     */
+    Symbol lookup(std::string_view s)
+    {
+        Symbol res;
+        symbols.cvisit(SymbolStr::Key{store, s, buffer}, [&](const auto & key) { res = Symbol(key); });
+        return res;
+    }
+
     std::vector<SymbolStr> resolve(const std::span<const Symbol> & symbols) const
     {
         std::vector<SymbolStr> result;
@@ -346,6 +360,91 @@ public:
     void dump(T callback) const
     {
         store.forEach(callback);
+    }
+};
+
+/**
+ * The names a parse on another thread met that the table did not have when
+ * the parse began. Ids follow interning order and attribute sets are sorted
+ * by id, so interning them from that thread would make evaluation order
+ * depend on timing. They get ids of their own instead, with `localBit` set,
+ * until `intern` puts them into the table on the evaluator's thread, in the
+ * order a serial parse would have
+ */
+class LocalSymbols
+{
+    std::vector<std::string_view> names;
+    std::pmr::monotonic_buffer_resource strings;
+
+public:
+    static constexpr uint32_t localBit = uint32_t(1) << 31;
+
+    /**
+     * Ids below this are the table's. Every one of them must be in the
+     * table, visible to `lookup`, before the parse begins, so that each
+     * name is either the table's or local for the whole parse
+     */
+    const uint32_t known;
+
+    explicit LocalSymbols(uint32_t known)
+        : known(known)
+    {
+    }
+
+    static bool isLocal(Symbol s)
+    {
+        return s.id & localBit;
+    }
+
+    bool isKnown(Symbol s) const
+    {
+        return s.id < known;
+    }
+
+    Symbol add(std::string_view s)
+    {
+        auto p = static_cast<char *>(strings.allocate(s.size() + 1, 1));
+        memcpy(p, s.data(), s.size());
+        p[s.size()] = 0;
+        names.emplace_back(p, s.size());
+        return Symbol(localBit | uint32_t(names.size() - 1));
+    }
+
+    std::string_view operator[](Symbol s) const
+    {
+        return names[s.id & ~localBit];
+    }
+
+    size_t size() const
+    {
+        return names.size();
+    }
+
+    /**
+     * Intern the names in the order they were met, through `intern`
+     * (`std::string_view` to `Symbol`), and return what each id maps to
+     */
+    template<typename F>
+    std::vector<Symbol> intern(F && intern) const
+    {
+        std::vector<Symbol> to;
+        to.reserve(names.size());
+        for (auto & n : names)
+            to.push_back(intern(n));
+        return to;
+    }
+};
+
+/**
+ * Maps local symbols to table symbols and leaves the table's alone
+ */
+struct SymbolRemap
+{
+    std::span<const Symbol> to;
+
+    Symbol operator()(Symbol s) const
+    {
+        return LocalSymbols::isLocal(s) ? to[s.getId() & ~LocalSymbols::localBit] : s;
     }
 };
 

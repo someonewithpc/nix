@@ -145,6 +145,11 @@ struct Expr
     }
 
     // These are temporary methods to be used only in parser.y
+    /**
+     * Replace local symbols in this expression and below, and sort what is
+     * sorted by symbol again
+     */
+    virtual void remapSymbols(const SymbolRemap & remap) {}
     virtual void resetCursedOr() {};
     virtual void warnIfCursedOr(const SymbolTable & symbols, const PosTable & positions) {};
 };
@@ -262,6 +267,7 @@ struct ExprVar : Expr
         return pos;
     }
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -339,6 +345,7 @@ struct ExprSelect : Expr
      */
     Symbol evalExceptFinalSelect(EvalState & state, Env & env, Value & attrs);
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -359,6 +366,7 @@ struct ExprOpHasAttr : Expr
         return e->getPos();
     }
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -548,6 +556,17 @@ struct ExprAttrs : Expr
                 mergeAppended();
         }
 
+        /**
+         * Sort again after the names changed
+         */
+        void resort()
+        {
+            auto less = [](auto & a, auto & b) { return a.first < b.first; };
+            if (!std::is_sorted(v.begin(), v.end(), less))
+                std::sort(v.begin(), v.end(), less);
+            inOrder = v.size();
+        }
+
     private:
         void mergeAppended();
     };
@@ -595,6 +614,7 @@ struct ExprAttrs : Expr
         return pos;
     }
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 
     /**
@@ -617,6 +637,7 @@ struct ExprList : Expr
         std::ranges::copy(exprs, elems.begin());
     };
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
     Value * maybeThunk(EvalState & state, Env & env) override;
 
@@ -753,6 +774,7 @@ public:
     }
 
     virtual void setDocComment(DocComment docComment) override;
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -790,6 +812,7 @@ struct ExprCall : Expr
     virtual void resetCursedOr() override;
     virtual void warnIfCursedOr(const SymbolTable & symbols, const PosTable & positions) override;
     void moveDataToAllocator(std::pmr::polymorphic_allocator<char> & alloc);
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -800,6 +823,7 @@ struct ExprLet : Expr
     ExprLet(ExprAttrs * attrs, Expr * body)
         : attrs(attrs)
         , body(body) {};
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -819,6 +843,7 @@ struct ExprWith : Expr
         return pos;
     }
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -837,6 +862,7 @@ struct ExprIf : Expr
         return pos;
     }
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -854,6 +880,7 @@ struct ExprAssert : Expr
         return pos;
     }
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -868,6 +895,7 @@ struct ExprOpNot : Expr
         return e->getPos();
     }
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
@@ -895,6 +923,11 @@ struct ExprOpNot : Expr
         e2->bindVars(es, env);                                                           \
     }                                                                                    \
     void eval(EvalState & state, Env & env, Value & v) override;                         \
+    void remapSymbols(const SymbolRemap & remap) override                                \
+    {                                                                                    \
+        e1->remapSymbols(remap);                                                         \
+        e2->remapSymbols(remap);                                                         \
+    }                                                                                    \
     PosIdx getPos() const override                                                       \
     {                                                                                    \
         return pos;                                                                      \
@@ -960,6 +993,7 @@ struct ExprConcatStrings : Expr
         return pos;
     }
 
+    void remapSymbols(const SymbolRemap & remap) override;
     COMMON_METHODS
 };
 
