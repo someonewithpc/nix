@@ -163,3 +163,43 @@ expect 1 env NIX_ALLOW_EVAL=0 nix eval "$subRef#sub"
 [[ $(nix eval "$subRef#sub") = '"sub-two\n"' ]]
 # Without submodules=1 the submodule is an empty directory, so its files are not inputs
 NIX_ALLOW_EVAL=0 nix eval "$evalDir#yes"
+
+# The recorded workdir status follows stat changes, as Git's index does
+evalRef="$evalDir#drv.drvPath"
+fresh() { nix eval --no-eval-cache --raw "$evalRef"; }
+nix eval "$evalRef"
+touch "$evalDir/data"
+NIX_ALLOW_EVAL=0 nix eval "$evalRef"
+# Same size and mtime, so only ctime and the racy check catch it
+cp -p "$evalDir/data" "$TEST_ROOT/data-old"
+echo ten >"$evalDir/data"
+touch -r "$TEST_ROOT/data-old" "$evalDir/data"
+expect 1 env NIX_ALLOW_EVAL=0 nix eval "$evalRef"
+[[ $(nix eval --raw "$evalRef") = $(fresh) ]]
+# A clean file changed in place
+echo '# comment' >>"$evalDir/config.nix"
+expect 1 env NIX_ALLOW_EVAL=0 nix eval "$evalRef"
+[[ $(nix eval --raw "$evalRef") = $(fresh) ]]
+git -C "$evalDir" stash
+expect 1 env NIX_ALLOW_EVAL=0 nix eval "$evalRef"
+[[ $(nix eval --raw "$evalRef") = $(fresh) ]]
+git -C "$evalDir" stash pop
+git -C "$evalDir" checkout -b other
+echo eleven >"$evalDir/data"
+git -C "$evalDir" commit -a -m other
+[[ $(nix eval --raw "$evalRef") = $(fresh) ]]
+otherDrv=$(fresh)
+git -C "$evalDir" checkout -
+[[ $(nix eval --raw "$evalRef") = $(fresh) ]]
+[[ $(fresh) != "$otherDrv" ]]
+git -C "$evalDir" checkout other
+[[ $(NIX_ALLOW_EVAL=0 nix eval --raw "$evalRef") = "$otherDrv" ]]
+# A new commit in the submodule, recorded in the parent
+git -C "$evalDir/sub" checkout data
+echo sub-three >"$subDir/data"
+git -C "$subDir" commit -a -m three
+git -C "$evalDir/sub" pull -q
+git -C "$evalDir" add sub
+[[ $(nix eval "$subRef#sub") = '"sub-three\n"' ]]
+git -C "$evalDir" commit -m "Update submodule"
+[[ $(nix eval "$subRef#sub") = '"sub-three\n"' ]]

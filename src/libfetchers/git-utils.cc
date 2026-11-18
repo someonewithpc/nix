@@ -5,6 +5,7 @@
 #include "nix/fetchers/cache.hh"
 #include "nix/fetchers/fetch-settings.hh"
 #include "nix/util/base-n.hh"
+#include "nix/util/environment-variables.hh"
 #include "nix/util/finally.hh"
 #include "nix/util/os-string.hh"
 #include "nix/util/processes.hh"
@@ -667,6 +668,37 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         }
 
         return info;
+    }
+
+    /* The files outside the working tree that getWorkdirInfo()
+       reads, besides the objects, which don't change. */
+    std::vector<std::filesystem::path> getWorkdirInfoGitFiles()
+    {
+        std::filesystem::path gitDir = git_repository_path(*this);
+        std::filesystem::path commonDir = git_repository_commondir(*this);
+        std::vector<std::filesystem::path> res{
+            path / ".gitmodules",
+            gitDir / "HEAD",
+            gitDir / "index",
+            gitDir / "config",
+            gitDir / "commondir",
+            gitDir / "info" / "attributes",
+            commonDir / "packed-refs",
+            commonDir / "config",
+            "/etc/gitconfig",
+        };
+        /* A .git directory changes whenever Git takes a lock, and
+           its files are listed above. */
+        if (!std::filesystem::is_directory(path / ".git"))
+            res.push_back(path / ".git");
+        res.push_back(getHome() / ".gitconfig");
+        if (auto xdg = getEnv("XDG_CONFIG_HOME"))
+            res.push_back(std::filesystem::path(*xdg) / "git" / "config");
+        else
+            res.push_back(getHome() / ".config" / "git" / "config");
+        if (auto ref = getWorkdirRef(); ref && ref->starts_with("refs/"))
+            res.push_back(commonDir / *ref);
+        return res;
     }
 
     std::optional<std::string> getWorkdirRef() override
@@ -1703,6 +1735,164 @@ ref<GitRepoPool> Settings::getTarballWriterPool() const
 
 static Sync<std::map<std::filesystem::path, GitRepo::WorkdirInfo>> workdirInfoCache_;
 
+/* getWorkdirInfo() is a function of the working tree's tracked files
+   and a few files in the Git directory. Like Git's index, remember it
+   with the stat of those files and reuse it while none of them changes.
+   A file whose mtime is not older than the second in which the record
+   was started could have changed since without a visible stat change,
+   so the record is not used then. */
+namespace {
+
+constexpr std::string_view workdirRecordVersion = "nix-git-workdir-1";
+
+std::string statLine(const std::filesystem::path & path)
+{
+    auto st = maybeLstat(path);
+    if (!st)
+        return "-";
+#if defined(__APPLE__)
+    auto mtime = st->st_mtimespec, ctime = st->st_ctimespec;
+#elif defined(_WIN32)
+    struct
+    {
+        time_t tv_sec;
+        long tv_nsec;
+    } mtime{st->st_mtime, 0}, ctime{st->st_ctime, 0};
+#else
+    auto mtime = st->st_mtim, ctime = st->st_ctim;
+#endif
+    return std::to_string(st->st_mode) + ' ' + std::to_string(st->st_size) + ' ' + std::to_string(st->st_ino) + ' '
+           + std::to_string(st->st_dev) + ' ' + std::to_string(mtime.tv_sec) + '.' + std::to_string(mtime.tv_nsec)
+           + ' ' + std::to_string(ctime.tv_sec) + '.' + std::to_string(ctime.tv_nsec);
+}
+
+std::filesystem::path workdirRecordPath(const std::filesystem::path & workdir)
+{
+    return getCacheDir() / "git-workdir-v1"
+           / hashString(HashAlgorithm::SHA256, workdir.string()).to_string(HashFormat::Base16, false);
+}
+
+bool racy(std::string_view stat, time_t startTime)
+{
+    if (stat == "-")
+        return false;
+    size_t start = 0;
+    for (int n = 0; n < 4 && start != stat.npos; ++n)
+        start = stat.find(' ', start + 1);
+    if (start == stat.npos)
+        return true;
+    auto mtime = stat.substr(start + 1, stat.find('.', start) - start - 1);
+    return string2Int<time_t>(mtime).value_or(startTime) >= startTime;
+}
+
+std::optional<GitRepo::WorkdirInfo> readWorkdirRecord(const std::filesystem::path & workdir)
+{
+    std::string text;
+    try {
+        text = readFile(workdirRecordPath(workdir));
+    } catch (SystemError &) {
+        return std::nullopt;
+    }
+
+    auto lines = tokenizeString<std::vector<std::string>>(text, "\n");
+    if (lines.size() < 3 || lines[0] != workdirRecordVersion)
+        return std::nullopt;
+    auto startTime = string2Int<time_t>(lines[1]);
+    if (!startTime)
+        return std::nullopt;
+
+    GitRepo::WorkdirInfo info;
+    for (auto & line : std::ranges::subrange(lines.begin() + 2, lines.end())) {
+        auto tab = line.find('\t');
+        if (line.size() < 2 || line[1] != ' ' || tab == line.npos)
+            return std::nullopt;
+        auto key = std::string_view(line).substr(2, tab - 2);
+        auto value = std::string_view(line).substr(tab + 1);
+        switch (line[0]) {
+        case 'h':
+            if (key != "-")
+                info.headRev = Hash::parseAny(key, key.size() == 64 ? HashAlgorithm::SHA256 : HashAlgorithm::SHA1);
+            info.isDirty = value == "dirty";
+            break;
+        case 'g':
+        case 'f':
+        case 'm':
+        case 'x': {
+            std::filesystem::path p = line[0] == 'g' ? std::filesystem::path(value) : workdir / value;
+            if (key != statLine(p) || racy(key, *startTime))
+                return std::nullopt;
+            if (line[0] == 'f' || line[0] == 'm')
+                info.files.insert(CanonPath(value));
+            if (line[0] == 'm')
+                info.dirtyFiles.insert(CanonPath(value));
+            if (line[0] == 'x')
+                info.deletedFiles.insert(CanonPath(value));
+            break;
+        }
+        case 's': {
+            auto fields = tokenizeString<std::vector<std::string>>(value, "\t");
+            auto field = [&](size_t n) { return n < fields.size() && fields[n] != "-" ? fields[n].substr(1) : ""; };
+            info.submodules.push_back({.path = CanonPath(key), .url = field(0), .branch = field(1)});
+            break;
+        }
+        default:
+            return std::nullopt;
+        }
+    }
+    return info;
+}
+
+void writeWorkdirRecord(
+    const std::filesystem::path & workdir,
+    const GitRepo::WorkdirInfo & info,
+    const std::vector<std::filesystem::path> & gitFiles,
+    time_t startTime)
+{
+    auto bad = [](std::string_view s) { return s.find_first_of("\n\t") != s.npos; };
+
+    std::string text = fmt("%s\n%d\n", workdirRecordVersion, startTime);
+    text += fmt("h %s\t%s\n", info.headRev ? info.headRev->gitRev() : "-", info.isDirty ? "dirty" : "clean");
+    for (auto & p : gitFiles) {
+        if (bad(p.string()))
+            return;
+        text += fmt("g %s\t%s\n", statLine(p), p.string());
+    }
+    auto addFile = [&](char kind, const CanonPath & file) {
+        if (bad(file.rel()))
+            return false;
+        text += fmt("%c %s\t%s\n", kind, statLine(workdir / file.rel()), file.rel());
+        return true;
+    };
+    for (auto & file : info.files)
+        if (!addFile(info.dirtyFiles.contains(file) ? 'm' : 'f', file))
+            return;
+    for (auto & file : info.dirtyFiles)
+        if (!info.files.contains(file))
+            return;
+    for (auto & file : info.deletedFiles)
+        if (!addFile('x', file))
+            return;
+    for (auto & submodule : info.submodules) {
+        auto field = [](const std::string & s) { return s.empty() ? std::string("-") : "=" + s; };
+        if (bad(submodule.path.abs()) || bad(submodule.url) || bad(submodule.branch))
+            return;
+        text += fmt("s %s\t%s\t%s\n", submodule.path.abs(), field(submodule.url), field(submodule.branch));
+    }
+
+    try {
+        auto recordPath = workdirRecordPath(workdir);
+        createDirs(recordPath.parent_path());
+        auto tmp = recordPath;
+        tmp += fmt(".tmp-%d", getpid());
+        writeFile(tmp, text);
+        renameFile(tmp, recordPath);
+    } catch (SystemError & e) {
+        debug("cannot write Git workdir record: %s", e.what());
+    }
+}
+
+} // namespace
+
 GitRepo::WorkdirInfo GitRepo::getCachedWorkdirInfo(const std::filesystem::path & path)
 {
     auto & _cache = workdirInfoCache_;
@@ -1712,9 +1902,17 @@ GitRepo::WorkdirInfo GitRepo::getCachedWorkdirInfo(const std::filesystem::path &
         if (i != cache->end())
             return i->second;
     }
-    auto workdirInfo = GitRepo::openRepo(path, {})->getWorkdirInfo();
-    _cache.lock()->emplace(path, workdirInfo);
-    return workdirInfo;
+    auto workdirInfo = readWorkdirRecord(path);
+    if (workdirInfo)
+        debug("using the recorded status of Git workdir %s", PathFmt(path));
+    else {
+        auto startTime = time(nullptr);
+        auto repo = make_ref<GitRepoImpl>(path, GitRepo::Options{});
+        workdirInfo = repo->getWorkdirInfo();
+        writeWorkdirRecord(path, *workdirInfo, repo->getWorkdirInfoGitFiles(), startTime);
+    }
+    _cache.lock()->emplace(path, *workdirInfo);
+    return *workdirInfo;
 }
 
 void GitRepo::invalidateWorkdirInfoCache()
