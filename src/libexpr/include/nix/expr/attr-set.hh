@@ -4,7 +4,6 @@
 #include "nix/expr/nixexpr.hh"
 #include "nix/expr/symbol-table.hh"
 
-#include <boost/container/static_vector.hpp>
 #include <boost/iterator/function_output_iterator.hpp>
 
 #include <algorithm>
@@ -131,6 +130,12 @@ public:
         return size() == 0;
     }
 
+    /**
+     * Walks a set with one layer as a pointer range. For a layered set it
+     * merges the layers on the fly: at each step it yields the smallest name
+     * among the layers, from the topmost layer that has it, then skips that
+     * name in every layer
+     */
     class iterator
     {
     public:
@@ -143,162 +148,62 @@ public:
         friend class Bindings;
 
     private:
-        struct BindingsCursor
+        struct Cursor
         {
-            /**
-             * Attr that the cursor currently points to.
-             */
             pointer current;
-
-            /**
-             * One past the end pointer to the contiguous buffer of Attrs.
-             */
             pointer end;
-
-            /**
-             * Priority of the value. Lesser values have more priority (i.e. they override
-             * attributes that appear later in the linked list of Bindings).
-             */
-            uint32_t priority;
-
-            pointer operator->() const noexcept
-            {
-                return current;
-            }
-
-            reference get() const noexcept
-            {
-                return *current;
-            }
-
-            bool empty() const noexcept
-            {
-                return current == end;
-            }
-
-            void increment() noexcept
-            {
-                ++current;
-            }
-
-            void consume(Symbol name) noexcept
-            {
-                while (!empty() && current->name <= name)
-                    ++current;
-            }
-
-            GENERATE_CMP(BindingsCursor, me->current->name, me->priority)
         };
 
-        using QueueStorageType = boost::container::static_vector<BindingsCursor, maxLayers>;
-
-        /**
-         * Comparator implementing the override priority / name ordering
-         * for BindingsCursor.
-         */
-        static constexpr auto comp = std::greater<BindingsCursor>();
-
-        /**
-         * A priority queue used to implement an on-the-fly k-way merge.
-         */
-        QueueStorageType cursorHeap;
-
-        /**
-         * The attribute the iterator currently points to.
-         */
         pointer current = nullptr;
 
         /**
-         * Whether iterating over a single attribute and not a merge chain.
+         * End of the range for a set with one layer
          */
-        bool doMerge = true;
+        pointer rangeEnd = nullptr;
 
-        void push(BindingsCursor cursor) noexcept
+        /**
+         * Number of layers left to merge, topmost first. Zero for a set with
+         * one layer
+         */
+        uint32_t numCursors = 0;
+
+        union
         {
-            cursorHeap.push_back(cursor);
-            std::ranges::make_heap(cursorHeap, comp);
-        }
+            Cursor cursors[maxLayers];
+        };
 
-        [[nodiscard]] BindingsCursor pop() noexcept
+        void pickSmallest() noexcept
         {
-            std::ranges::pop_heap(cursorHeap, comp);
-            auto cursor = cursorHeap.back();
-            cursorHeap.pop_back();
-            return cursor;
-        }
-
-        iterator & finished() noexcept
-        {
-            current = nullptr;
-            return *this;
-        }
-
-        void next(BindingsCursor cursor) noexcept
-        {
-            current = &cursor.get();
-            cursor.increment();
-
-            if (!cursor.empty())
-                push(cursor);
-        }
-
-        std::optional<BindingsCursor> consumeAllUntilCurrentName() noexcept
-        {
-            auto cursor = pop();
-            Symbol lastHandledName = current->name;
-
-            while (cursor->name <= lastHandledName) {
-                cursor.consume(lastHandledName);
-                if (!cursor.empty())
-                    push(cursor);
-
-                if (cursorHeap.empty())
-                    return std::nullopt;
-
-                cursor = pop();
+            if (numCursors == 0) {
+                current = nullptr;
+                return;
             }
-
-            return cursor;
+            pointer best = cursors[0].current;
+            for (uint32_t i = 1; i < numCursors; ++i)
+                if (cursors[i].current->name < best->name)
+                    best = cursors[i].current;
+            current = best;
         }
 
         explicit iterator(const Bindings & attrs) noexcept
-            : doMerge(attrs.baseLayer)
         {
-            auto pushBindings = [this, priority = unsigned{0}](const Bindings & layer) mutable {
-                auto first = layer.attrs;
-                push(
-                    BindingsCursor{
-                        .current = first,
-                        .end = first + layer.numAttrs,
-                        .priority = priority++,
-                    });
-            };
-
-            if (!doMerge) {
-                if (attrs.empty())
-                    return;
-
-                current = attrs.attrs;
-                pushBindings(attrs);
-
+            if (!attrs.baseLayer) [[likely]] {
+                if (attrs.numAttrs != 0) {
+                    current = attrs.attrs;
+                    rangeEnd = attrs.attrs + attrs.numAttrs;
+                }
                 return;
             }
 
-            const Bindings * layer = &attrs;
-            while (layer) {
+            for (const Bindings * layer = &attrs; layer; layer = layer->baseLayer)
                 if (layer->numAttrs != 0)
-                    pushBindings(*layer);
-                layer = layer->baseLayer;
-            }
+                    cursors[numCursors++] = {layer->attrs, layer->attrs + layer->numAttrs};
 
-            if (cursorHeap.empty())
-                return;
-
-            next(pop());
+            pickSmallest();
         }
 
     public:
-        iterator() = default;
+        iterator() noexcept {}
 
         reference operator*() const noexcept
         {
@@ -312,21 +217,23 @@ public:
 
         iterator & operator++() noexcept
         {
-            if (!doMerge) {
-                ++current;
-                if (current == cursorHeap.front().end)
-                    return finished();
+            if (numCursors == 0) [[likely]] {
+                if (++current == rangeEnd)
+                    current = nullptr;
                 return *this;
             }
 
-            if (cursorHeap.empty())
-                return finished();
-
-            auto cursor = consumeAllUntilCurrentName();
-            if (!cursor)
-                return finished();
-
-            next(*cursor);
+            Symbol last = current->name;
+            uint32_t kept = 0;
+            for (uint32_t i = 0; i < numCursors; ++i) {
+                Cursor c = cursors[i];
+                while (c.current != c.end && c.current->name <= last)
+                    ++c.current;
+                if (c.current != c.end)
+                    cursors[kept++] = c;
+            }
+            numCursors = kept;
+            pickSmallest();
             return *this;
         }
 
