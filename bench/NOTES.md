@@ -406,6 +406,51 @@ after, 64 ms serial. A piece of a parse that interns into the table may
 use any symbol it finds there, since that is the id the parse would use;
 counting only the static symbols as known made it 63 ms
 
+### 2026-11-18 on beryllium: derivation text once (B1), batched writes (A4)
+
+B1 renders each derivation's ATerm once and writes structured attrs as
+JSON text without an nlohmann tree. Instructions (`perf stat -e
+instructions:u`, `--read-only`, median of 3 interleaved runs, `fast-eval`
+against the branch):
+
+| Workload | fast-eval | B1 | Change |
+|---|---|---|---|
+| `hello.drvPath` | 1.116 G | 1.005 G | -9.9% |
+| minimal NixOS (`nixos.nix`) | 20.02 G | 18.06 G | -9.8% |
+| real system toplevel | 71.71 G | 59.56 G | -16.9% |
+
+Checks for B1:
+
+- T0 `eval-diff.sh -s all` against the base build: 0 of 1507 cases differ
+- The `.drv` closures of `nixos.nix` (3656 files) and of the real system
+  (17944 files), written by base and by B1 into two fresh chroot stores
+  (`--store <dir>`): every file byte-identical
+- `JSONTextWriter` against `dump()`: 50000 random trees, every one- and
+  two-byte string, floats, int64 limits. Invalid UTF-8 throws the same
+  error at the same point, in `builtins.toJSON` and in `derivationStrict`
+
+A4 queues the derivation writes of a daemon client and sends them in
+batches: the temp roots in one `AddTempRoots` (when the daemon has it),
+the validity checks as pipelined `IsValidPath` in chunks of 256, then the
+missing derivations in order. `QueryValidPaths` was tried first, but a
+daemon serving a builder refuses it (`dep-built-drv-submitted`). The queue
+is flushed before an operation on a queued path, before any operation that
+could read one without naming it, before a direct file system read of a
+queued path, at 4096 entries or 32 MB, at the end of `StoreCommand::run`
+and `nix-instantiate`, and in `~EvalState`
+
+Daemon round trips for the real system in write mode, counted with strace
+against the system's 2.35.6 daemon: 39,877 with B1, 4,000 with A4. What
+is left is source copies (2374 `AddToStore`), 1,367 `IsValidPath` (about
+140 of them the chunks above) and 219 `QueryPathInfo`. Getting under 200
+needs the source copies batched too, which A4 does not cover
+
+Checks for A4: T0 `-s all` as above, a minimal NixOS with a fresh zlib
+overlay written through the daemon (same drv path as base, closure of
+4171 paths valid), and probes for IFD, `readFile` of a fresh drv with and
+without context, `builtins.storePath` and `nix-instantiate` output that
+exists after exit
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
