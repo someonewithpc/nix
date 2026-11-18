@@ -571,6 +571,59 @@ same way on the shared build ("File name too long" for a lock file
 path). T0 quick suites against base: 0 of 500 differ. The system
 drvPath is the same as base's with `--no-eval-cache`
 
+### 2026-11-18 on beryllium: eval cache hit path (A3b)
+
+| Build | Clean hit | Dirty hit | `--version` | `--expr 1` | Clean wall | Dirty wall | `--version` wall |
+|---|---|---|---|---|---|---|---|
+| A2 static (`fe-a2-startup`) | 201.6 M | 92.0 M | 43.1 M | 44.3 M | 33.0 ms | 24.1 ms | 11.4 ms |
+| A3b (`fe-a3b-hitpath`) | 74.2 M | 74.1 M | 29.9 M | 31.1 M | 21.1 ms | 21.3 ms | 9.6 ms |
+
+The hits are `nix eval` of the system's drvPath on copies of `/etc/nixos`,
+one with everything committed and one with an edited module. Instructions
+are `perf stat -e instructions:u -r 20`, wall times hyperfine with 60 runs
+at load 19, both builds static dev builds with their own `XDG_CACHE_HOME`.
+Scripts: `measure.sh` and `hf.sh` in the agent's scratch directory
+
+- A clean tree took the ref from libgit2, which loaded OpenSSL and the CA
+  bundle and opened the repository. The workdir record now holds the ref,
+  and the repository opens only to verify a commit
+- The import prefetcher's threads start when the evaluator first asks for
+  a queued import, so a hit starts none. A full eval of the system took
+  8.5 s on A2 and 8.7 s here (5 runs each, within noise at that load)
+- The eval cache fingerprint reuses the lock file JSON that lockFlake
+  built for its comparison: 78.2 M to 74.2 M
+- The AWS credential code is a module, `libnixstore-aws.so`, that
+  libnixstore loads the first time it needs credentials. It links no Nix
+  library, so it works the same with static and shared Nix libraries.
+  `nix --version` on a shared build went from 70.7 M to 56.4 M. With
+  `default_library=static` (pkgsStatic) the code is linked into
+  libnixstore as before; that libnixstore compiles, but no fully static
+  nix was linked or run here
+
+Where the 74 M go: ld.so 37% (system libraries), lockFlake 32% (reading
+the lock file 8%, the old lock file's JSON for the comparison 3%), the
+workdir record 5%, SQLite 3%
+
+Tests:
+
+- `edit-tests.sh` (scratch directory) on copies of `/etc/nixos`: A1's
+  dirty cases, then on a clean tree a commit, a commit that changes the
+  drv, a checkout of an evaluated rev (a hit, equal to a fresh eval), a
+  checkout of a new rev, a staged-only change, an amend and a branch
+  switch. Edits miss, every cached answer equals `--no-eval-cache`, 0
+  failures
+- `eval-cache.sh` gained a ref check across a branch switch to the same
+  commit and a detached HEAD
+- Suites flakes, git and git-hashing, lang, the fetchGit tests and the
+  fetchers, store, expr and flake unit tests: 52 passed, 0 failed,
+  lang-gc skipped. T0 quick suites against base: 0 of 500 differ
+- S3 against the A2 build: `nix config show`, `nix --help`, `nix store
+  info --help` and `nix help-stores` print the same, as do bad `s3://`
+  URLs. Credentials from the environment and the failing IMDS chain, with
+  `-vvvvv` against an endpoint on 127.0.0.1, log the same lines on the
+  static and the shared build. Configuring with `s3-aws-auth` disabled
+  builds no module
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
@@ -583,5 +636,7 @@ drvPath is the same as base's with `--no-eval-cache`
   cache on 37% of its samples once the table outgrows L2
 - Build and test NEON under qemu-aarch64
 - Decide on the cachix spool hook (`bench/a6-proposals/cachix-spool.patch`)
+- Reading the 55 KB lock file is 8% of an eval cache hit; A3 planned to
+  keep the parsed lock keyed by its content hash
 - Kernel time per sandboxed build (10 ms) and per input path (0.07-0.13
   ms) need kernel profiles, which `perf_event_paranoid` 2 rules out
