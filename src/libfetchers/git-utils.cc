@@ -1446,19 +1446,24 @@ GitRepoImpl::getAccessor(const Hash & rev, const GitAccessorOptions & options, s
         return rawGitAccessor;
 }
 
+ref<SourceAccessor> GitRepo::getWorkdirAccessor(
+    const std::filesystem::path & path, const WorkdirInfo & wd, MakeNotAllowedError makeNotAllowedError)
+{
+    return AllowListSourceAccessor::create(
+               // Follow the final symlink to the repo. Older nix versions used to do this (maybe somewhat accidentally).
+               makeFSSourceAccessor(path, /*trackLastModified=*/false, FinalSymlink::Follow),
+               /*allowedPrefixes=*/wd.files,
+               // Always allow access to the root, but not its children.
+               /*allowedPaths=*/{CanonPath::root},
+               std::move(makeNotAllowedError))
+        .cast<SourceAccessor>();
+}
+
 ref<SourceAccessor> GitRepoImpl::getAccessor(
     const WorkdirInfo & wd, const GitAccessorOptions & options, MakeNotAllowedError makeNotAllowedError)
 {
     auto self = ref<GitRepoImpl>(shared_from_this());
-    ref<SourceAccessor> fileAccessor =
-        AllowListSourceAccessor::create(
-            // Follow the final symlink to the repo. Older nix versions used to do this (maybe somewhat accidentally).
-            makeFSSourceAccessor(path, /*trackLastModified=*/false, FinalSymlink::Follow),
-            /*allowedPrefixes=*/wd.files,
-            // Always allow access to the root, but not its children.
-            /*allowedPaths=*/{CanonPath::root},
-            std::move(makeNotAllowedError))
-            .cast<SourceAccessor>();
+    auto fileAccessor = getWorkdirAccessor(path, wd, std::move(makeNotAllowedError));
     if (options.exportIgnore)
         fileAccessor = make_ref<GitExportIgnoreSourceAccessor>(self, fileAccessor, std::nullopt);
     return fileAccessor;

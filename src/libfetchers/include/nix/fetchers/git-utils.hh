@@ -103,6 +103,13 @@ struct GitRepo
     virtual ref<SourceAccessor> getAccessor(
         const WorkdirInfo & wd, const GitAccessorOptions & options, MakeNotAllowedError makeNotAllowedError) = 0;
 
+    /**
+     * The accessor that `getAccessor(wd, {}, ...)` returns, without
+     * opening the repository.
+     */
+    static ref<SourceAccessor> getWorkdirAccessor(
+        const std::filesystem::path & path, const WorkdirInfo & wd, MakeNotAllowedError makeNotAllowedError);
+
     virtual void flush() = 0;
 
     virtual std::unique_ptr<merkle::DirectorySinkWithFinalize> makeDirectorySink() = 0;

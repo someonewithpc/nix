@@ -1025,12 +1025,12 @@ struct GitInputScheme : InputScheme
         for (auto & submodule : repoInfo.workdirInfo.submodules)
             repoInfo.workdirInfo.files.insert(submodule.path);
 
-        auto repo = GitRepo::openRepo(repoPath, {});
-
         auto exportIgnore = getExportIgnoreAttr(input);
 
         ref<SourceAccessor> accessor =
-            repo->getAccessor(repoInfo.workdirInfo, {.exportIgnore = exportIgnore}, makeNotAllowedError(repoPath));
+            exportIgnore ? GitRepo::openRepo(repoPath, {})->getAccessor(
+                               repoInfo.workdirInfo, {.exportIgnore = true}, makeNotAllowedError(repoPath))
+                         : GitRepo::getWorkdirAccessor(repoPath, repoInfo.workdirInfo, makeNotAllowedError(repoPath));
 
         /* If the repo has submodules, return a mounted input accessor
            consisting of the accessor for the top-level repo and, per
