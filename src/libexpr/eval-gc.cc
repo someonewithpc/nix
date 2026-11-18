@@ -22,6 +22,11 @@
 
 #endif
 
+#if NIX_USE_BOEHMGC && defined(__GLIBC__)
+#  include <unistd.h>
+extern "C" void * __libc_stack_end;
+#endif
+
 namespace nix {
 
 #if NIX_USE_BOEHMGC
@@ -59,6 +64,17 @@ static inline void initGCReal()
     /* Enable perf measurements. This is just a setting; not much of a
        start of something. */
     GC_start_performance_measurement();
+
+#  ifdef __GLIBC__
+    /* Boehm finds the stack of the initialising thread with
+       pthread_getattr_np(), which parses /proc/self/maps. For the main
+       thread, __libc_stack_end is enough: above it there are only argv,
+       the environment and the auxiliary vector. */
+    if (gettid() == getpid()) {
+        GC_stack_base mainStack{.mem_base = __libc_stack_end};
+        GC_set_stackbottom(nullptr, &mainStack);
+    }
+#  endif
 
     GC_INIT();
 
