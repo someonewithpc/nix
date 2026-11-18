@@ -91,6 +91,7 @@ mkMesonDerivation (
 
     mesonFlags = [
       (lib.mesonBool "plugin-c-api" nix-cli.exportsPluginCApi)
+      (lib.mesonBool "static-nix-libraries" nix-cli.linksNixLibrariesStatically or false)
     ];
 
     doCheck = true;

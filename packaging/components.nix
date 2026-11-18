@@ -193,6 +193,9 @@ let
         export CXXFLAGS="''${CXXFLAGS:-} ${toString interpositionFlags}"
       '';
     outputs = prevAttrs.outputs or [ "out" ] ++ [ "dev" ];
+    mesonFlags =
+      prevAttrs.mesonFlags or [ ]
+      ++ lib.optional scope.withStaticNixLibraries "-Ddefault_library=both";
   };
 
   fixupStaticLayer = finalAttrs: prevAttrs: {
@@ -349,6 +352,13 @@ in
     Whether to embed the public C API into nix-cli so plugins can resolve those symbols from the executable.
   */
   withPluginCAPI = !(stdenv.hostPlatform.isWindows || stdenv.hostPlatform.isStatic);
+
+  /**
+    Whether to link the Nix libraries into nix-cli statically, so it starts faster.
+    The libraries are then built both shared and static. C++ plugins that link the
+    shared Nix libraries fail to load into such a nix.
+  */
+  withStaticNixLibraries = stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isStatic;
 
   /**
     A user-provided extension function to apply to each component derivation.

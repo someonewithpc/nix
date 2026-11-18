@@ -277,6 +277,8 @@ nixComponents.callPackage (
       ++ map (transformFlag "libstore") (ignoreCrossFile nixComponents.nix-store.mesonFlags)
       ++ map (transformFlag "libfetchers") (ignoreCrossFile nixComponents.nix-fetchers.mesonFlags)
       ++ map (transformFlag "libexpr") (ignoreCrossFile nixComponents.nix-expr.mesonFlags)
+      ++ map (transformFlag "libflake") (ignoreCrossFile nixComponents.nix-flake.mesonFlags)
+      ++ map (transformFlag "libmain") (ignoreCrossFile nixComponents.nix-main.mesonFlags)
       ++ map (transformFlag "libcmd") (ignoreCrossFile nixComponents.nix-cmd.mesonFlags)
       ++ map (transformFlag "libutil-c") (ignoreCrossFile nixComponents.nix-util-c.mesonFlags)
       ++ map (transformFlag "libstore-c") (ignoreCrossFile nixComponents.nix-store-c.mesonFlags)
@@ -284,7 +286,10 @@ nixComponents.callPackage (
       ++ map (transformFlag "libexpr-c") (ignoreCrossFile nixComponents.nix-expr-c.mesonFlags)
       ++ map (transformFlag "libflake-c") (ignoreCrossFile nixComponents.nix-flake-c.mesonFlags)
       ++ map (transformFlag "libmain-c") (ignoreCrossFile nixComponents.nix-main-c.mesonFlags)
-      ++ map (transformFlag "nix") (ignoreCrossFile nixComponents.nix-cli.mesonFlags);
+      ++ map (transformFlag "nix") (ignoreCrossFile nixComponents.nix-cli.mesonFlags)
+      ++ map (transformFlag "nix-functional-tests") (
+        ignoreCrossFile nixComponents.nix-functional-tests.mesonFlags
+      );
 
       nativeBuildInputs =
         dedupByString (v: "${v}") (

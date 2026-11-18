@@ -3,8 +3,11 @@
   lib,
   mkMesonExecutable,
 
+  nix-util,
   nix-store,
+  nix-fetchers,
   nix-expr,
+  nix-flake,
   nix-main,
   nix-cmd,
 
@@ -31,6 +34,10 @@
   # Whether to embed the public C API into the `nix` executable so plugins can
   # resolve those symbols without linking Nix libraries directly.
   withPluginCApi ? !stdenv.hostPlatform.isWindows && !stdenv.hostPlatform.isStatic,
+
+  # Whether to link the Nix libraries statically, which needs them built with
+  # `default_library=both`. C++ plugins that link the shared libraries break.
+  withStaticNixLibraries ? false,
 }:
 
 let
@@ -98,11 +105,24 @@ mkMesonExecutable (finalAttrs: {
     nix-store-c
     nix-util-c
   ]
+  # The static libraries need their private dependencies at link time
+  ++ lib.optionals withStaticNixLibraries (
+    lib.concatMap (p: p.buildInputs) [
+      nix-util
+      nix-store
+      nix-fetchers
+      nix-expr
+      nix-flake
+      nix-main
+      nix-cmd
+    ]
+  )
   ++ lib.optional withMimalloc mimalloc;
 
   mesonFlags = [
     (lib.mesonEnable "mimalloc" withMimalloc)
     (lib.mesonBool "plugin-c-api" withPluginCApi)
+    (lib.mesonBool "static-nix-libraries" withStaticNixLibraries)
   ];
 
   postInstall = lib.optionalString stdenv.hostPlatform.isStatic ''
@@ -112,6 +132,7 @@ mkMesonExecutable (finalAttrs: {
 
   passthru = {
     exportsPluginCApi = withPluginCApi;
+    linksNixLibrariesStatically = withStaticNixLibraries;
   };
 
   meta = {
