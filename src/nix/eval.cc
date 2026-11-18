@@ -1,4 +1,6 @@
 #include "nix/cmd/command-installable-value.hh"
+#include "nix/cmd/installable-flake.hh"
+#include "nix/expr/eval-cache.hh"
 #include "nix/main/common-args.hh"
 #include "nix/main/shared.hh"
 #include "nix/store/store-api.hh"
@@ -64,7 +66,15 @@ struct CmdEval : MixJSON, InstallableValueCommand, MixReadOnlyOption
 
         auto state = getEvalState();
 
-        auto [v, pos] = installable->toValue(*state, AutoCall::No);
+        Value * v = nullptr;
+        PosIdx pos = noPos;
+        if (auto flake = dynamic_cast<InstallableFlake *>(&*installable)) {
+            auto cursor = flake->getCursor(*state, AutoCall::No);
+            v = cursor->getCachedValue();
+            if (!v)
+                v = &cursor->forceValue();
+        } else
+            std::tie(v, pos) = installable->toValue(*state, AutoCall::No);
         NixStringContext context;
 
         if (apply) {

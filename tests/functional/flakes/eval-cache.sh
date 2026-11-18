@@ -84,3 +84,60 @@ nix build --no-link "$flake1Dir#stack-depth"
 expect 1 nix build "$flake1Dir#ifd" --option allow-import-from-derivation false 2>&1 \
   | grepQuiet 'error: cannot build .* during evaluation because the option '\''allow-import-from-derivation'\'' is disabled'
 nix build --no-link "$flake1Dir#ifd"
+
+# nix eval answers from the cache and prints what a fresh eval prints
+evalDir="$TEST_ROOT/eval-cache-eval"
+createGitRepo "$evalDir" ""
+cp "${config_nix}" "$evalDir/"
+cat >"$evalDir/flake.nix" <<EOF2
+{
+  outputs = { self }: let inherit (import ./config.nix) mkDerivation; in rec {
+    drv = builtins.trace "eval-drv" (mkDerivation {
+      name = "eval-cache-eval";
+      buildCommand = "echo \$(cat \${./data}) > \\\$out";
+    });
+    str = builtins.trace "eval-str" "hello";
+    slash = "/not/a/path";
+    path = ./data;
+    big = 4294967297;
+    yes = true;
+    sub = builtins.readFile ./sub/data;
+  };
+}
+EOF2
+echo one >"$evalDir/data"
+git -C "$evalDir" add config.nix flake.nix data
+git -C "$evalDir" commit -m Init
+
+for attr in drv.drvPath str slash path big yes; do
+  fresh=$(nix eval --no-eval-cache "$evalDir#$attr")
+  [[ $(nix eval "$evalDir#$attr") = "$fresh" ]]
+  [[ $(nix eval "$evalDir#$attr") = "$fresh" ]]
+  [[ $(nix eval --json "$evalDir#$attr") = $(nix eval --no-eval-cache --json "$evalDir#$attr") ]]
+done
+NIX_ALLOW_EVAL=0 nix eval "$evalDir#drv.drvPath" 2>&1 | grepQuietInverse 'trace: eval-drv'
+NIX_ALLOW_EVAL=0 nix eval "$evalDir#str"
+NIX_ALLOW_EVAL=0 nix eval "$evalDir#big"
+NIX_ALLOW_EVAL=0 nix eval "$evalDir#yes"
+# A string without context may be a cached path, so it is evaluated
+expect 1 env NIX_ALLOW_EVAL=0 nix eval "$evalDir#slash"
+expect 1 env NIX_ALLOW_EVAL=0 nix eval "$evalDir#path"
+
+# A cached drvPath whose derivation was deleted is evaluated again
+drvPath=$(nix eval --raw "$evalDir#drv.drvPath")
+nix-store --delete "$drvPath"
+[[ ! -e "$drvPath" ]]
+[[ $(nix eval --raw "$evalDir#drv.drvPath") = "$drvPath" ]]
+[[ -e "$drvPath" ]]
+NIX_ALLOW_EVAL=0 nix eval --read-only "$evalDir#str"
+
+# Editing a file in a dirty tree is a miss, also when the size stays
+echo two >"$evalDir/data"
+expect 1 env NIX_ALLOW_EVAL=0 nix eval "$evalDir#drv.drvPath"
+drvTwo=$(nix eval --raw "$evalDir#drv.drvPath")
+[[ $drvTwo != "$drvPath" ]]
+[[ $(NIX_ALLOW_EVAL=0 nix eval --raw "$evalDir#drv.drvPath") = "$drvTwo" ]]
+echo six >"$evalDir/data"
+expect 1 env NIX_ALLOW_EVAL=0 nix eval "$evalDir#drv.drvPath"
+[[ $(nix eval --raw "$evalDir#drv.drvPath") = $(nix eval --no-eval-cache --raw "$evalDir#drv.drvPath") ]]
+

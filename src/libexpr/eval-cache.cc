@@ -499,6 +499,53 @@ Value & AttrCursor::forceValue()
     return v;
 }
 
+static const StorePath & contextStorePath(const NixStringContextElem & c)
+{
+    return std::visit(
+        overloaded{
+            [&](const NixStringContextElem::DrvDeep & d) -> const StorePath & { return d.drvPath; },
+            [&](const NixStringContextElem::Built & b) -> const StorePath & { return b.drvPath->getBaseStorePath(); },
+            [&](const NixStringContextElem::Opaque & o) -> const StorePath & { return o.path; },
+        },
+        c.raw);
+}
+
+Value * AttrCursor::getCachedValue()
+{
+    if (!root->db)
+        return nullptr;
+
+    if (!cachedValue)
+        cachedValue = root->db->getAttr(getKey());
+    if (!cachedValue)
+        return nullptr;
+
+    auto & state = root->state;
+    auto v = state.allocValue();
+
+    if (auto s = std::get_if<string_t>(&cachedValue->second)) {
+        /* forceValue() stores a path as a string without context. */
+        if (s->second.empty() && s->first.starts_with('/'))
+            return nullptr;
+        if (!settings.readOnlyMode)
+            for (auto & c : s->second) {
+                auto & path = contextStorePath(c);
+                state.store->addTempRoot(path);
+                if (!state.store->isValidPath(path))
+                    return nullptr;
+            }
+        v->mkString(s->first, s->second, state.mem);
+    } else if (auto b = std::get_if<bool>(&cachedValue->second))
+        v->mkBool(*b);
+    else if (auto i = std::get_if<int_t>(&cachedValue->second))
+        v->mkInt(i->x);
+    else
+        return nullptr;
+
+    debug("using cached value of attribute '%s'", getAttrPathStr());
+    return v;
+}
+
 Suggestions AttrCursor::getSuggestionsForAttr(Symbol name)
 {
     auto attrNames = getAttrs();
@@ -628,15 +675,7 @@ string_t AttrCursor::getStringWithContext()
             if (auto s = std::get_if<string_t>(&cachedValue->second)) {
                 bool valid = true;
                 for (auto & c : s->second) {
-                    const StorePath & path = std::visit(
-                        overloaded{
-                            [&](const NixStringContextElem::DrvDeep & d) -> const StorePath & { return d.drvPath; },
-                            [&](const NixStringContextElem::Built & b) -> const StorePath & {
-                                return b.drvPath->getBaseStorePath();
-                            },
-                            [&](const NixStringContextElem::Opaque & o) -> const StorePath & { return o.path; },
-                        },
-                        c.raw);
+                    auto & path = contextStorePath(c);
                     root->state.store->addTempRoot(path);
                     if (!root->state.store->isValidPath(path)) {
                         valid = false;

@@ -169,6 +169,16 @@ public:
     Value & forceValue();
 
     /**
+     * Return a new value equal to what evaluating this attribute gives,
+     * built from the cache, or nullptr when the cache can't tell. That
+     * is the case for attribute sets, lists and functions, for failed
+     * attributes, for strings without context that may have been paths,
+     * and for strings whose context paths are not valid outside
+     * read-only mode
+     */
+    Value * getCachedValue();
+
+    /**
      * Force creation of the .drv file in the Nix store.
      */
     StorePath forceDerivation();
