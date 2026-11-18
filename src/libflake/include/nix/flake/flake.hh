@@ -135,6 +135,11 @@ struct LockedFlake
      */
     std::map<ref<Node>, SourcePath> nodePaths;
 
+    /**
+     * `lockFile.toJSON()`, when lockFlake() computed it anyway.
+     */
+    std::shared_ptr<const nlohmann::json> lockFileJSON;
+
     std::optional<Fingerprint> getFingerprint(Store & store, const fetchers::Settings & fetchSettings) const;
 };
 

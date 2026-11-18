@@ -800,7 +800,9 @@ LockedFlake lockFlake(
         auto sourcePath = topRef.input.getSourcePath();
 
         /* Check whether we need to / can write the new lock file. */
-        if (newLockFile != oldLockFile || lockFlags.outputLockFilePath) {
+        auto newLockFileJSON = newLockFile.toJSON().first;
+        bool lockFileChanged = newLockFileJSON != oldLockFile.toJSON().first;
+        if (lockFileChanged || lockFlags.outputLockFilePath) {
 
             auto diff = LockFile::diff(oldLockFile, newLockFile);
 
@@ -887,7 +889,11 @@ LockedFlake lockFlake(
         }
 
         return LockedFlake{
-            .flake = std::move(flake), .lockFile = std::move(newLockFile), .nodePaths = std::move(nodePaths)};
+            .flake = std::move(flake),
+            .lockFile = std::move(newLockFile),
+            .nodePaths = std::move(nodePaths),
+            .lockFileJSON = lockFileChanged ? nullptr : std::make_shared<const nlohmann::json>(std::move(newLockFileJSON)),
+        };
 
     } catch (Error & e) {
         e.addTrace({}, "while updating the lock file of flake '%s'", flake.lockedRef.to_string());
@@ -989,7 +995,7 @@ std::optional<Fingerprint> LockedFlake::getFingerprint(Store & store, const fetc
     if (!fingerprint)
         return std::nullopt;
 
-    *fingerprint += fmt(";%s;%s", flake.lockedRef.subdir, lockFile);
+    *fingerprint += fmt(";%s;%s", flake.lockedRef.subdir, lockFileJSON ? lockFileJSON->dump(2) : fmt("%s", lockFile));
 
     if (auto revCount = get(flake.lockedRef.input.attrs, "revCount")) {
         if (std::get_if<fetchers::LazyAttr>(revCount)) {
