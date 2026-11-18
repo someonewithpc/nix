@@ -1,0 +1,102 @@
+Proposal for /etc/nixos (not applied): make the post-build hook a dash
+script that spools $OUT_PATHS to /run/cachix-push, and push the spool in
+batches from a systemd path unit. Per local build the hook drops from
+about 87 M instructions and 50-2300 ms on the build's critical path to
+about 2 M. See bench/BUILD-PATH.md. Applies to /etc/nixos at e8e0e81
+with `patch -p1` or `git apply`
+
+--- a/modules/cachix.nix
++++ b/modules/cachix.nix
+@@ -4,6 +4,8 @@
+   tokenFile = "/etc/nix/cachix-token";
+   socket = "/run/cachix-daemon/socket";
+ 
++  spool = "/run/cachix-push";
++
+   # Runs as root from nix-daemon after every successful build, and only for
+   # paths built locally — anything substitutable never reaches the hook — so
+   # this uploads exactly this host's own patched derivations.
+@@ -11,17 +13,46 @@
+   # It must not upload anything itself. A `cachix push` here deadlocks: it needs
+   # the same store nix-daemon is still holding open for the build that invoked
+   # it, so the build waits on the hook and the hook waits on the build. Observed
+-  # as a rebuild wedged for 12 minutes with cachix at 0 CPU. Enqueueing on the
+-  # daemon's socket returns immediately, and the upload happens out of band.
++  # as a rebuild wedged for 12 minutes with cachix at 0 CPU.
+   #
+-  # $OUT_PATHS is space-separated, hence the IFS. Failures are swallowed and the
+-  # enqueue is capped: no cachix problem may ever fail or stall a good build.
+-  pushHook = pkgs.writeShellScript "cachix-push-hook" ''
+-    set -uf
+-    export IFS=' '
+-    [ -S ${socket} ] || exit 0
+-    ${pkgs.coreutils}/bin/timeout 30 \
+-      ${pkgs.cachix}/bin/cachix daemon push --socket ${socket} $OUT_PATHS || true
++  # Nix waits for the hook before it releases the build's outputs, so the next
++  # build in a chain waits too. Starting bash, timeout and the cachix client
++  # for every build cost about 85 M instructions and 50-2300 ms each. The hook
++  # now only writes $OUT_PATHS to one spool file per derivation, which dash
++  # does in about 1 M instructions, and cachix-push-spool enqueues the spool
++  # in one batch. Failures are swallowed: no cachix problem may ever fail or
++  # stall a good build.
++  pushHook = pkgs.writeScript "cachix-push-hook" ''
++    #!${pkgs.dash}/bin/dash
++    printf '%s\n' "$OUT_PATHS" 2>/dev/null > ${spool}/"''${DRV_PATH##*/}"
++    exit 0
++  '';
++
++  # Enqueues what the hook spooled on the cachix daemon's socket, then drops
++  # the spool files it read, as the old hook dropped paths it could not
++  # enqueue. A file still empty is a hook mid-write and is left for the next
++  # run, unless it is older than a minute.
++  pushSpool = pkgs.writeShellScript "cachix-push-spool" ''
++    set -u
++    shopt -s nullglob
++    now=$(${pkgs.coreutils}/bin/date +%s)
++    paths=()
++    files=()
++    for f in ${spool}/*; do
++      if [ ! -s "$f" ]; then
++        (( now - $(${pkgs.coreutils}/bin/stat -c %Y "$f") < 60 )) && continue
++      else
++        read -r -a p < "$f" || true
++        paths+=("''${p[@]}")
++      fi
++      files+=("$f")
++    done
++    (( ''${#files[@]} )) || exit 0
++    if [ -S ${socket} ] && (( ''${#paths[@]} )); then
++      ${pkgs.coreutils}/bin/timeout 60 \
++        ${pkgs.cachix}/bin/cachix daemon push --socket ${socket} "''${paths[@]}" || true
++    fi
++    rm -f -- "''${files[@]}"
+   '';
+ 
+   # The token cannot live in git or the nix store (world-readable), so it is
+@@ -54,6 +85,26 @@
+     };
+   };
+ 
++  systemd.tmpfiles.rules = [ "d ${spool} 0700 root root -" ];
++
++  # Starts the push when the hook spools the first path. The delay lets the
++  # rest of a build chain spool before the batch goes out, and paths spooled
++  # while it runs start another run when it ends.
++  systemd.paths.cachix-push-spool = {
++    wantedBy = [ "multi-user.target" ];
++    pathConfig.DirectoryNotEmpty = spool;
++  };
++
++  systemd.services.cachix-push-spool = {
++    description = "Enqueue locally built paths on the cachix daemon";
++    after = [ "cachix-daemon.service" ];
++    serviceConfig = {
++      Type = "oneshot";
++      ExecStartPre = "${pkgs.coreutils}/bin/sleep 2";
++      ExecStart = pushSpool;
++    };
++  };
++
+   nix.settings = {
+     post-build-hook = pushHook;
+ 
