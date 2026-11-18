@@ -97,7 +97,7 @@ void BaseSetting<T>::convertToArg(Args & args, const std::string & category)
     args.addFlag({
         .longName = name,
         .aliases = aliases,
-        .description = fmt("Set the `%s` setting.", name),
+        .description = "Set the `" + name + "` setting.",
         .category = category,
         .labels = {"value"},
         .handler = {[this](std::string s) {
@@ -111,7 +111,7 @@ void BaseSetting<T>::convertToArg(Args & args, const std::string & category)
         args.addFlag({
             .longName = "extra-" + name,
             .aliases = aliases,
-            .description = fmt("Append to the `%s` setting.", name),
+            .description = "Append to the `" + name + "` setting.",
             .category = category,
             .labels = {"value"},
             .handler = {[this](std::string s) {

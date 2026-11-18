@@ -332,7 +332,7 @@ void BaseSetting<bool>::convertToArg(Args & args, const std::string & category)
     args.addFlag({
         .longName = name,
         .aliases = aliases,
-        .description = fmt("Enable the `%s` setting.", name),
+        .description = "Enable the `" + name + "` setting.",
         .category = category,
         .handler = {[this] { override(true); }},
         .experimentalFeature = experimentalFeature,
@@ -340,7 +340,7 @@ void BaseSetting<bool>::convertToArg(Args & args, const std::string & category)
     args.addFlag({
         .longName = "no-" + name,
         .aliases = aliases,
-        .description = fmt("Disable the `%s` setting.", name),
+        .description = "Disable the `" + name + "` setting.",
         .category = category,
         .handler = {[this] { override(false); }},
         .experimentalFeature = experimentalFeature,
