@@ -208,12 +208,19 @@ endif
 
 include_dirs = [ include_directories('.') ]
 
+nix_link_args = linker_export_flags
+# Statically linked, nix carries some 45k relative relocations, which ld.so
+# applies faster in the packed format
+if cxx.has_link_argument('-Wl,-z,pack-relative-relocs')
+  nix_link_args += [ '-Wl,-z,pack-relative-relocs' ]
+endif
+
 this_exe = executable(
   meson.project_name(),
   sources,
   dependencies : deps_private_subproject + deps_private + deps_private_no_pkgconfig + deps_plugin_c_apis,
   include_directories : include_dirs,
-  link_args : linker_export_flags,
+  link_args : nix_link_args,
   export_dynamic : get_option('plugin-c-api'),
   install : true,
   cpp_pch : do_pch ? [ 'pch/precompiled-headers.hh' ] : [],
