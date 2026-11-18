@@ -164,7 +164,16 @@ aws_crt_cpp = dependency(
   modules : [ 'AWS::aws-crt-cpp' ],
 )
 
-if s3_aws_auth.enabled()
+# The AWS CRT code is in a module that libnixstore loads when it first
+# needs credentials, so that nothing else links or loads the AWS libraries.
+# A fully static build can't load one, so it links the code in
+aws_module_name = 'libnixstore-aws.so'
+aws_as_module = s3_aws_auth.enabled() and get_option('default_library') != 'static'
+deps_other = []
+configdata_priv.set('NIX_AWS_AS_MODULE', aws_as_module.to_int())
+if aws_as_module
+  deps_other += aws_crt_cpp.partial_dependency(compile_args : true, includes : true)
+elif s3_aws_auth.enabled()
   deps_private_no_pkgconfig += aws_crt_cpp
 endif
 
@@ -224,6 +233,10 @@ endif
 # Aside from prefix itself, each of these was made into an absolute path
 # by joining it with prefix, unless it was already an absolute path
 # (which is the default for store-dir, localstatedir, and log-dir).
+if aws_as_module
+  configdata_priv.set_quoted('NIX_AWS_MODULE_PATH', libdir / aws_module_name)
+endif
+
 configdata_priv.set_quoted('NIX_STORE_DIR', store_dir)
 # On Windows, NIX_STATE_DIR, NIX_LOG_DIR, and NIX_CONF_DIR are determined at
 # runtime using the Windows known folders API (FOLDERID_ProgramData), so we
@@ -347,6 +360,9 @@ sources = files(
 if s3_aws_auth.enabled()
   sources += files('aws-creds.cc')
 endif
+if s3_aws_auth.enabled() and not aws_as_module
+  sources += files('aws-creds-module.cc')
+endif
 
 subdir('include/nix/store')
 
@@ -376,13 +392,26 @@ this_library = library(
   sources,
   config_priv_h,
   soversion : nix_soversion,
-  dependencies : deps_public + deps_private + deps_public_no_pkgconfig + deps_private_no_pkgconfig,
+  dependencies : deps_public + deps_private + deps_public_no_pkgconfig + deps_private_no_pkgconfig + deps_other,
   include_directories : include_dirs,
   link_args : linker_export_flags,
   prelink : true, # For C++ static initializers
   install : true,
   cpp_pch : do_pch ? [ 'pch/precompiled-headers.hh' ] : [],
 )
+
+if aws_as_module
+  shared_module(
+    'nixstore-aws',
+    'aws-creds-module.cc',
+    name_prefix : 'lib',
+    name_suffix : 'so',
+    dependencies : [ aws_crt_cpp, boost ],
+    gnu_symbol_visibility : 'hidden',
+    install : true,
+    install_dir : libdir,
+  )
+endif
 
 install_headers(headers, subdir : 'nix/store', preserve_path : true)
 
