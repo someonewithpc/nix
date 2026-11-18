@@ -514,6 +514,63 @@ it. `build-remote-trustless-should-fail-0`, `-should-pass-2` and
 `-should-pass-3` fail on "File name too long" for a lock file named
 after this worktree's path, before any of the changed code runs
 
+### 2026-11-18 on beryllium: start-up (A2)
+
+`static-nix-libraries` links the Nix libraries into `nix` from static
+archives, which the libraries build next to the shared ones under
+`default_library=both`. The packaging turns both on for Linux. C++
+plugins that link the shared libraries then fail with "Already registered
+store with name 'Dummy Store'". C API plugins still load
+
+| Build | `--version` | `--expr 1` | cache hit | `--version` wall | hit wall |
+|---|---|---|---|---|---|
+| A1 (`fe-a1-evalcache`) | 79.9 M | 81.2 M | 231.9 M | 15.2 ms | 34.1 ms |
+| A2, shared | 70.7 M | 71.9 M | 228.8 M | 13.4 ms | 34.0 ms |
+| A2, static | 42.8 M | 44.0 M | 200.6 M | 11.0 ms | 30.8 ms |
+
+The cache hit is `nix eval` of the system's drvPath on a clean
+`/etc/nixos`. Instructions are `perf stat -e instructions:u -r 20`, wall
+times hyperfine with 60 and 40 runs at load 7. These are dev builds,
+whose libraries lack the `-Bsymbolic-functions` the packaging adds. The
+packaged `nix-cli` (release, LTO) gains less:
+
+| `nix-cli` package | `--version` | `--expr 1` | cache hit | `--version` wall | hit wall |
+|---|---|---|---|---|---|
+| `withStaticNixLibraries = false` | 53.8 M | 55.0 M | 208.6 M | 12.8 ms | 31.9 ms |
+| static | 41.5 M | 42.7 M | 198.2 M | 10.9 ms | 29.5 ms |
+
+The packaged static nix has the same T0 results (0 of 500 differ). Its
+link needs the whole-archive dependencies in dependency order: with
+`nix-fetchers-whole-archive` after `nix-expr-whole-archive`, ld.bfd
+marked `libnixfetchers.so` as needed, both copies ran their static
+initialisers, and `nix --version` crashed on exit
+
+- Static linking cut the symbol relocations ld.so does at start from
+  37.3k to 17.6k. ld.so is still 70% of `--version`. The rest bind the
+  system libraries: the aws-c stack for S3 4.3k, libstdc++ 2.7k, curl
+  and what it pulls in 2.3k, krb5 1.3k, libxml2 0.9k
+- The earlier `-Bsymbolic-functions` trial (37,251 relocations) measured
+  the wrong libraries: the dev shell puts `outputs/out/lib` first in the
+  RUNPATH. With its own libraries it bound 25.3k
+- GC_init read `/proc/self/maps` through pthread_getattr_np(), about 2 M.
+  Setting flags built their descriptions with boost::format, about 0.5 M.
+  Packed relative relocations saved 0.8 M
+- On a clean `/etc/nixos` the hit opens the repo with libgit2
+  (`getAccessorFromWorkdir`), and libgit2's OpenSSL init loads the CA
+  bundle: 23% of the hit's samples. A3 measured 157 M on a dirty tree
+- Not done: `computeLevels()` (libcpuid, 1.1 M) runs for the default of
+  `extra-platforms`; a cheaper CPU check could compute other levels on
+  odd CPUs. Making the setting flags lazy would save most of the
+  remaining 2 M in `NixArgs`
+
+Tests: lang, the util, store, fetchers, expr and flake unit tests and the
+plugins suite pass on the shared build. On the static build the full
+`meson test` gives 297 passed, 3 failed, 8 skipped. The 3 are
+`build-remote-trustless-should-{pass-2,pass-3,fail-0}`, which fail the
+same way on the shared build ("File name too long" for a lock file
+path). T0 quick suites against base: 0 of 500 differ. The system
+drvPath is the same as base's with `--no-eval-cache`
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
