@@ -36,6 +36,7 @@ headers = [ config_pub_h ] + files(
   'derivation-options.hh',
   'derivation/aterm.hh',
   'derivation/full-inputs.hh',
+  'derivation/instantiate.hh',
   'derivation/masked.hh',
   'derivation/output.hh',
   'derivation/resolution.hh',

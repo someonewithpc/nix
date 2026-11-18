@@ -2,6 +2,7 @@
 ///@file
 
 #include "nix/store/derivations.hh"
+#include "nix/store/derivation/full-inputs.hh"
 #include "nix/util/fun.hh"
 
 #include <boost/unordered/concurrent_flat_map_fwd.hpp>
@@ -176,6 +177,14 @@ extern Hashes hashes;
 MaskedHash hashInput(const StoreDirConfig & store, ReadDerivation & readDerivation, const Full & drv);
 
 MaskedHash hashInput(Store & store, const Full & drv);
+
+/**
+ * Input masking on its own: each input derivation's masked hash, with the
+ * outputs used from it. `std::nullopt` when an input's output paths are
+ * not known yet, or an input is dynamic.
+ */
+std::optional<HashInputs::DrvMap> maskInputs(
+    const StoreDirConfig & store, ReadDerivation & readDerivation, const FullInputs & inputs, std::string_view drvName);
 
 /**
  * Compute the fully masked derivation, the preimage of a

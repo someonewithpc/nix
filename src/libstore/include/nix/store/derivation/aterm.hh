@@ -3,6 +3,7 @@
 
 #include "nix/store/derivations.hh"
 #include "nix/store/derivation/full-inputs.hh"
+#include "nix/util/fun.hh"
 
 namespace nix {
 
@@ -82,6 +83,67 @@ template<typename Inputs, typename Out>
 std::string unparse(
     const Derivation<Inputs, Out> & drv,
     const StoreDirConfig & store,
+    bool supportWindowsStoreDir = defaultSupportWindowsStoreDir);
+
+/**
+ * A derivation's ATerm from the input sources to the end, with gaps
+ * where the values of the env vars named after outputs go.
+ *
+ * The three ATerms input addressing needs (fully masked for the
+ * derivation's own input address, as written to the store, and input
+ * masked for its dependents) differ only in the outputs, the input
+ * derivations and those env vars, so the rest is rendered once and put
+ * together with `unparseHead` or `unparseMaskedHead`.
+ */
+struct UnparsedTail
+{
+    std::string text;
+
+    /**
+     * Offset into `text` and name of the env var, in order.
+     */
+    std::vector<std::pair<size_t, std::string>> gaps;
+
+    /**
+     * Write the text with `value(name)` in each gap.
+     */
+    void write(Sink & sink, fun<std::string_view(std::string_view)> value) const;
+};
+
+/**
+ * @param srcs The input sources, `FullInputs::fromSet(drv.inputs).srcs`
+ *
+ * @param structuredAttrsJson The structured attrs as JSON, in place of
+ * `drv.structuredAttrs`
+ *
+ * @param gapsForOutputs Leave gaps for the env vars named after outputs
+ */
+UnparsedTail unparseTail(
+    const StoreDirConfig & store,
+    const Full & drv,
+    const StorePathSet & srcs,
+    std::optional<std::string_view> structuredAttrsJson,
+    bool gapsForOutputs,
+    bool supportWindowsStoreDir = defaultSupportWindowsStoreDir);
+
+/**
+ * The ATerm up to the input sources, with the input derivations by path.
+ */
+std::string unparseHead(
+    const StoreDirConfig & store,
+    const Full & drv,
+    const FullInputs & inputs,
+    bool supportWindowsStoreDir = defaultSupportWindowsStoreDir);
+
+/**
+ * The ATerm up to the input sources, with the input derivations by masked
+ * hash, and with `maskOutputs` the outputs masked too.
+ */
+std::string unparseMaskedHead(
+    const StoreDirConfig & store,
+    const Full & drv,
+    const std::map<Hash, std::set<OutputName, std::less<>>> & inputDrvs,
+    bool maskOutputs,
     bool supportWindowsStoreDir = defaultSupportWindowsStoreDir);
 
 /**

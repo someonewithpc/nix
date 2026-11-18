@@ -1,4 +1,5 @@
 #include "nix/store/derivations.hh"
+#include "nix/store/derivation/instantiate.hh"
 #include "nix/store/derivation/masked.hh"
 #include "nix/store/downstream-placeholder.hh"
 #include "nix/expr/eval-inline.hh"
@@ -1524,7 +1525,7 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
 
     /* Check whether attributes should be passed as a JSON file. */
     using nlohmann::json;
-    std::optional<StructuredAttrs> jsonObject;
+    std::optional<StructuredAttrsText> jsonObject;
     auto pos = v.determinePos(noPos);
     auto attr = attrs->get(state.s.structuredAttrs);
     if (attr
@@ -1532,8 +1533,10 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
             *attr->value,
             pos,
             "while evaluating the `__structuredAttrs` "
-            "attribute passed to builtins.derivationStrict"))
-        jsonObject = StructuredAttrs{};
+            "attribute passed to builtins.derivationStrict")) {
+        jsonObject.emplace();
+        jsonObject->json.beginObject();
+    }
 
     /* Check whether null attributes should be ignored. */
     bool ignoreNulls = false;
@@ -1661,7 +1664,13 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
                     if (i->name == state.s.structuredAttrs)
                         continue;
 
-                    jsonObject->structuredAttrs.emplace(key, printValueAsJSON(state, true, *i->value, pos, context));
+                    jsonObject->json.key(key);
+                    if (isDerivationOptionAttr(key)) {
+                        auto & j = jsonObject->options.structuredAttrs[std::string{key}] =
+                            printValueAsJSON(state, true, *i->value, pos, context);
+                        jsonObject->json.value(j);
+                    } else
+                        printValueAsJSON(state, true, *i->value, pos, jsonObject->json, context);
 
                     switch (i->name.getId()) {
                     case EvalState::s.builder.getId():
@@ -1792,7 +1801,7 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
         /* The only other way `drv.structuredAttrs` can be set is when
            `jsonObject` is not set. */
         assert(!drv.structuredAttrs);
-        drv.structuredAttrs = std::move(*jsonObject);
+        jsonObject->json.endObject();
     }
 
     /* Everything in the context of the strings in the derivation
@@ -1911,7 +1920,8 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
         }
     }
 
-    else {
+    bool fillIn = false;
+    if (!outputHash && !contentAddressed && !isImpure) {
         /* Compute a hash over the "masked" store derivation, which is
            the final one except that in the list of outputs, the
            output paths are empty strings, and the corresponding
@@ -1922,8 +1932,7 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
             drv.env[i] = "";
             drv.outputs.insert_or_assign(i, DerivationOutput::Deferred{});
         }
-
-        fillInOutputPaths(drv, *state.store);
+        fillIn = true;
     }
 
     /* Write the resulting term into the Nix store directory.
@@ -1931,8 +1940,11 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
        Unless we are in read-only mode, that is, in which case we do not
        write anything. Users commonly do this to speed up evaluation in
        contexts where they don't actually want to build anything. */
-    auto drvPath =
-        settings.readOnlyMode ? computeStorePath(*state.store, drv) : state.store->writeDerivation(drv, state.repair);
+    auto inst = derivation::instantiate(
+        *state.store, drv, jsonObject ? &*jsonObject : nullptr, fillIn, /*wantContents=*/!settings.readOnlyMode);
+    auto & drvPath = inst.path;
+    if (!settings.readOnlyMode)
+        state.store->writeDerivationText(drvPath, inst.contents, inst.references, state.repair);
     auto drvPathS = state.store->printStorePath(drvPath);
 
     printMsg(lvlChatty, "instantiated '%1%' -> '%2%'", drvName, drvPathS);
@@ -1940,10 +1952,7 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
     /* Optimisation, but required in read-only mode! because in that
        case we don't actually write store derivations, so we can't
        read them later. */
-    {
-        auto h = derivation::masked::hashInput(*state.store, drv);
-        derivation::masked::hashes.insert_or_assign(drvPath, std::move(h));
-    }
+    derivation::masked::hashes.insert_or_assign(drvPath, std::move(inst.hash));
 
     auto result = state.buildBindings(1 + drv.outputs.size());
     result.alloc(state.s.drvPath)

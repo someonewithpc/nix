@@ -7,6 +7,7 @@
 #include "nix/util/types.hh"
 #include "nix/util/util.hh"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <variant>
@@ -98,6 +99,25 @@ DerivationOptions<StorePath> derivationOptionsFromStructuredAttrs(
     assert(resolved);
 
     return *resolved;
+}
+
+bool isDerivationOptionAttr(std::string_view name)
+{
+    /* Keep in sync with `derivationOptionsFromStructuredAttrs` below. */
+    static constexpr std::string_view names[] = {
+        "outputChecks",
+        "unsafeDiscardReferences",
+        "exportReferencesGraph",
+        "__sandboxProfile",
+        "__noChroot",
+        "__impureHostDeps",
+        "impureEnvVars",
+        "__darwinAllowLocalNetworking",
+        "requiredSystemFeatures",
+        "preferLocalBuild",
+        "allowSubstitutes",
+    };
+    return std::ranges::find(names, name) != std::end(names);
 }
 
 static void flatten(const nlohmann::json & value, StringSet & res)

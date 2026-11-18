@@ -75,6 +75,20 @@ static bool inputMasked(
         res.raw);
 }
 
+std::optional<HashInputs::DrvMap> maskInputs(
+    const StoreDirConfig & store, ReadDerivation & readDerivation, const FullInputs & inputs, std::string_view drvName)
+{
+    HashInputs::DrvMap res;
+    for (auto & [drvPath, node] : inputs.drvs.map) {
+        /* Need to build and resolve dynamic derivations first */
+        if (!node.childMap.empty())
+            return std::nullopt;
+        if (inputMasked(store, readDerivation, res, drvPath, node.value, drvName))
+            return std::nullopt;
+    }
+    return res;
+}
+
 /**
  * Input masking: replace each input derivation store path with its masked
  * hash, producing the intermediate form whose ATerm is hashed.
@@ -106,13 +120,10 @@ maskInputDrvs(const StoreDirConfig & store, ReadDerivation & readDerivation, Der
         .name = std::move(drv.name),
     };
 
-    for (auto & [drvPath, node] : drv.inputs.drvs.map) {
-        /* Need to build and resolve dynamic derivations first */
-        if (!node.childMap.empty())
-            return std::nullopt;
-        if (inputMasked(store, readDerivation, masked.inputs.drvs.map, drvPath, node.value, masked.name))
-            return std::nullopt;
-    }
+    auto drvs = maskInputs(store, readDerivation, drv.inputs, masked.name);
+    if (!drvs)
+        return std::nullopt;
+    masked.inputs.drvs.map = std::move(*drvs);
 
     return masked;
 }

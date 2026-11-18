@@ -913,6 +913,16 @@ public:
     virtual StorePath writeDerivation(const Derivation & drv, RepairFlag repair = NoRepair);
 
     /**
+     * Write a derivation given as its ATerm, with the store path and
+     * references `derivation::instantiate` computed for it.
+     */
+    virtual void writeDerivationText(
+        const StorePath & path,
+        std::string_view contents,
+        const StorePathSet & references,
+        RepairFlag repair = NoRepair);
+
+    /**
      * Read a derivation (which must already be valid).
      */
     virtual Derivation readDerivation(const StorePath & drvPath);

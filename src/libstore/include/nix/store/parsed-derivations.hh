@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include "nix/util/types.hh"
+#include "nix/util/json-text.hh"
 #include "nix/store/path.hh"
 
 namespace nix {
@@ -78,6 +79,24 @@ struct StructuredAttrs
      * field.
      */
     static std::string writeShell(const nlohmann::json::object_t & prepared);
+};
+
+/**
+ * Structured attrs as `derivationStrict` builds them: the JSON as text,
+ * and as a tree only the attributes the derivation options are parsed
+ * from.
+ */
+struct StructuredAttrsText
+{
+    /**
+     * The JSON `StructuredAttrs::unparse` would give for all of them.
+     */
+    JSONTextWriter json;
+
+    /**
+     * The attributes for which `isDerivationOptionAttr` holds.
+     */
+    StructuredAttrs options;
 };
 
 } // namespace nix

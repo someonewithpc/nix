@@ -118,7 +118,13 @@ StorePath computeStorePath(const StoreDirConfig & store, const Derivation & drv)
 StorePath Store::writeDerivation(const Derivation & drv, RepairFlag repair)
 {
     auto [suffix, contents, references, path] = infoForDerivation(*this, drv);
+    writeDerivationText(path, contents, references, repair);
+    return path;
+}
 
+void Store::writeDerivationText(
+    const StorePath & path, std::string_view contents, const StorePathSet & references, RepairFlag repair)
+{
     /* In case the derivation is already valid, we bail out early since that's
        faster. But we need to make sure that the derivation has a corresponding
        temproot. It is added by the remote in addToStoreFromDump, but we'd like
@@ -126,20 +132,18 @@ StorePath Store::writeDerivation(const Derivation & drv, RepairFlag repair)
     addTempRoot(path);
 
     if (isValidPath(path) && !repair)
-        return path;
+        return;
 
     StringSource s{contents};
     auto path2 = addToStoreFromDump(
         s,
-        suffix,
+        path.name(),
         FileSerialisationMethod::Flat,
         ContentAddressMethod::Raw::Text,
         HashAlgorithm::SHA256,
         references,
         repair);
     assert(path2 == path);
-
-    return path;
 }
 
 // FIXME: remove

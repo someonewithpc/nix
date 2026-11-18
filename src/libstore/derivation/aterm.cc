@@ -782,26 +782,26 @@ static void unparseOutput(
 }
 
 /**
- * This one, unlike the public one, is polymorphic on the output parameter to
- * support the masked hash intermediate form.
+ * Everything before the input sources: the outputs and the input
+ * derivations. With `maskOutputs`, every output is printed as `Deferred`.
  */
-template<typename Inputs, typename Out>
-    requires RenderableDerivation<Inputs, Out>
-std::string unparse(const Derivation<Inputs, Out> & drv, const StoreDirConfig & store, bool supportWindowsStoreDir)
+static void unparseHead(
+    std::string & s,
+    const StoreDirConfig & store,
+    const auto & outputs,
+    const auto & inputDrvs,
+    std::string_view drvName,
+    bool dynDrvDep,
+    bool maskOutputs,
+    bool supportWindowsStoreDir)
 {
     using namespace std::literals::string_view_literals;
-
-    std::string s;
-    s.reserve(65536);
 
     /* Use older unversioned form if possible, for wider compat. Use
        newer form only if we need it, which we do for
        `Xp::DynamicDerivations`. (The masked hash intermediate form
        never has dynamic inputs; they are resolved away before it is
        constructed.) */
-    bool dynDrvDep = false;
-    if constexpr (std::is_same_v<Inputs, FullInputs>)
-        dynDrvDep = hasDynamicDrvDep(drv.inputs);
     if (dynDrvDep) {
         s += "DrvWithVersion("sv;
         // Only version we have so far
@@ -813,51 +813,184 @@ std::string unparse(const Derivation<Inputs, Out> & drv, const StoreDirConfig & 
 
     printMap(
         s,
-        drv.outputs,
+        outputs,
         [&](const auto & outputName) { printUnquotedString(s, outputName); },
         [&](const auto & outputName, const auto & output) {
-            unparseOutput(store, s, output, drv.name, outputName, supportWindowsStoreDir);
+            if (maskOutputs)
+                unparseOutput(store, s, Output::Deferred{}, drvName, outputName, supportWindowsStoreDir);
+            else
+                unparseOutput(store, s, output, drvName, outputName, supportWindowsStoreDir);
         });
 
     s += ',';
     printMap(
         s,
-        drv.inputs.drvs.map,
+        inputDrvs,
         [&](const auto & key) { printKey(store, s, key, supportWindowsStoreDir); },
         [&](const auto &, const auto & node) { unparseDerivedPathMapNode(store, s, node); });
 
     s += ',';
-    printStorePaths(store, s, drv.inputs.srcs, supportWindowsStoreDir);
+}
+
+/**
+ * The input sources to the end. The structured attrs, if any, are the
+ * env var `__json`. Where `gaps` is given, the values of the env vars in
+ * `gapNames` are left out and their offsets recorded instead.
+ */
+static void unparseTail(
+    std::string & s,
+    const StoreDirConfig & store,
+    const StorePathSet & srcs,
+    const std::string & platform,
+    const std::string & builder,
+    const Strings & args,
+    const StringPairs & env,
+    std::optional<std::string_view> structuredAttrsJson,
+    const auto * gapNames,
+    std::vector<std::pair<size_t, std::string>> * gaps,
+    bool supportWindowsStoreDir)
+{
+    printStorePaths(store, s, srcs, supportWindowsStoreDir);
 
     s += ',';
-    printUnquotedString(s, drv.platform);
+    printUnquotedString(s, platform);
     s += ',';
-    printString(s, drv.builder);
+    printString(s, builder);
     s += ',';
-    printStrings(s, drv.args);
+    printStrings(s, args);
 
     s += ',';
 
-    auto unparseEnv = [&](const StringPairs & atermEnv) {
-        printMap(
-            s,
-            atermEnv,
-            [&](const auto & name) { printString(s, name); },
-            [&](const auto &, const auto & value) { printString(s, value); });
+    StructuredAttrs::checkKeyNotInUse(env);
+
+    s += '[';
+    bool first = true;
+    auto entry = [&](std::string_view name, std::string_view value) {
+        if (first)
+            first = false;
+        else
+            s += ',';
+        s += '(';
+        printString(s, name);
+        s += ',';
+        if (gaps && std::ranges::any_of(*gapNames, [&](const auto & elem) { return keyOf(elem) == name; }))
+            gaps->emplace_back(s.size(), name);
+        else
+            printString(s, value);
+        s += ')';
     };
-
-    StructuredAttrs::checkKeyNotInUse(drv.env);
-    if (drv.structuredAttrs) {
-        StringPairs scratch = drv.env;
-        scratch.insert(drv.structuredAttrs->unparse());
-        unparseEnv(scratch);
-    } else {
-        unparseEnv(drv.env);
+    /* Merged in at its place in the sorted order. */
+    bool jsonDone = !structuredAttrsJson;
+    for (auto & [name, value] : env) {
+        if (!jsonDone && name > StructuredAttrs::envVarName) {
+            entry(StructuredAttrs::envVarName, *structuredAttrsJson);
+            jsonDone = true;
+        }
+        entry(name, value);
     }
+    if (!jsonDone)
+        entry(StructuredAttrs::envVarName, *structuredAttrsJson);
+    s += ']';
 
     s += ')';
+}
+
+/**
+ * This one, unlike the public one, is polymorphic on the output parameter to
+ * support the masked hash intermediate form.
+ */
+template<typename Inputs, typename Out>
+    requires RenderableDerivation<Inputs, Out>
+std::string unparse(const Derivation<Inputs, Out> & drv, const StoreDirConfig & store, bool supportWindowsStoreDir)
+{
+    std::string s;
+    s.reserve(65536);
+
+    bool dynDrvDep = false;
+    if constexpr (std::is_same_v<Inputs, FullInputs>)
+        dynDrvDep = hasDynamicDrvDep(drv.inputs);
+
+    unparseHead(s, store, drv.outputs, drv.inputs.drvs.map, drv.name, dynDrvDep, false, supportWindowsStoreDir);
+
+    std::optional<std::string> json;
+    if (drv.structuredAttrs) {
+        StructuredAttrs::checkKeyNotInUse(drv.env);
+        json = drv.structuredAttrs->unparse().second;
+    }
+    unparseTail(
+        s,
+        store,
+        drv.inputs.srcs,
+        drv.platform,
+        drv.builder,
+        drv.args,
+        drv.env,
+        json,
+        (const StringSet *) nullptr,
+        nullptr,
+        supportWindowsStoreDir);
 
     return s;
+}
+
+void UnparsedTail::write(Sink & sink, fun<std::string_view(std::string_view)> value) const
+{
+    size_t pos = 0;
+    std::string quoted;
+    for (auto & [offset, name] : gaps) {
+        sink(std::string_view{text}.substr(pos, offset - pos));
+        quoted.clear();
+        printString(quoted, value(name));
+        sink(quoted);
+        pos = offset;
+    }
+    sink(std::string_view{text}.substr(pos));
+}
+
+std::string
+unparseHead(const StoreDirConfig & store, const Full & drv, const FullInputs & inputs, bool supportWindowsStoreDir)
+{
+    std::string s;
+    unparseHead(
+        s, store, drv.outputs, inputs.drvs.map, drv.name, hasDynamicDrvDep(inputs), false, supportWindowsStoreDir);
+    return s;
+}
+
+std::string unparseMaskedHead(
+    const StoreDirConfig & store,
+    const Full & drv,
+    const masked::HashInputs::DrvMap & inputDrvs,
+    bool maskOutputs,
+    bool supportWindowsStoreDir)
+{
+    std::string s;
+    unparseHead(s, store, drv.outputs, inputDrvs, drv.name, false, maskOutputs, supportWindowsStoreDir);
+    return s;
+}
+
+UnparsedTail unparseTail(
+    const StoreDirConfig & store,
+    const Full & drv,
+    const StorePathSet & srcs,
+    std::optional<std::string_view> structuredAttrsJson,
+    bool gapsForOutputs,
+    bool supportWindowsStoreDir)
+{
+    UnparsedTail res;
+    res.text.reserve(65536);
+    unparseTail(
+        res.text,
+        store,
+        srcs,
+        drv.platform,
+        drv.builder,
+        drv.args,
+        drv.env,
+        structuredAttrsJson,
+        &drv.outputs,
+        gapsForOutputs ? &res.gaps : nullptr,
+        supportWindowsStoreDir);
+    return res;
 }
 
 /* The masked hash intermediate forms, unparsed by `masked.cc`. */

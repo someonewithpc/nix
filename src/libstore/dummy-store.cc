@@ -326,6 +326,12 @@ public:
         return drvPath;
     }
 
+    void writeDerivationText(
+        const StorePath & path, std::string_view contents, const StorePathSet &, RepairFlag repair) override
+    {
+        writeDerivation(derivation::parse(*this, std::string{contents}, Derivation::nameFromPath(path)), repair);
+    }
+
     Derivation readDerivation(const StorePath & drvPath) override
     {
         if (std::optional res = getConcurrent(derivations, drvPath))

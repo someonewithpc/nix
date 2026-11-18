@@ -278,6 +278,7 @@ sources = files(
   'derivation-options.cc',
   'derivation/aterm.cc',
   'derivation/full-inputs.cc',
+  'derivation/instantiate.cc',
   'derivation/json.cc',
   'derivation/masked.cc',
   'derivation/output.cc',

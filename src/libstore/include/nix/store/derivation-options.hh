@@ -232,6 +232,13 @@ DerivationOptions<SingleDerivedPath> derivationOptionsFromStructuredAttrs(
     bool shouldWarn = true,
     const ExperimentalFeatureSettings & mockXpSettings = experimentalFeatureSettings);
 
+/**
+ * Whether `derivationOptionsFromStructuredAttrs` reads the structured
+ * attribute `name` when `shouldWarn` is false. The others can be kept as
+ * JSON text only.
+ */
+bool isDerivationOptionAttr(std::string_view name);
+
 DerivationOptions<StorePath> derivationOptionsFromStructuredAttrs(
     const StoreDirConfig & store,
     const StringMap & env,
