@@ -286,11 +286,21 @@ struct ImportPrefetcher
         return 2;
     }
 
+    unsigned threadsToStart;
+
+    /* The threads start when the evaluator first asks for a queued
+       path, so that an eval cache hit, which reads flake.nix and none
+       of its imports, starts none */
     ImportPrefetcher(EvalState & state, unsigned n)
         : state(state)
         , knownSymbols(state.symbols.size() + 1)
+        , threadsToStart(n)
     {
-        for (unsigned i = 0; i < n; i++)
+    }
+
+    void startThreads()
+    {
+        for (; threadsToStart; --threadsToStart)
             threads.emplace_back([this] { work(); });
     }
 
@@ -327,6 +337,8 @@ struct ImportPrefetcher
         {
             std::lock_guard lock(m);
             auto [i, added] = files.try_emplace(resolved, nullptr);
+            if (threadsToStart && seen.contains(resolved))
+                startThreads();
             if (added)
                 return nullptr;
             f = std::move(i->second);
