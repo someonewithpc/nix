@@ -349,6 +349,10 @@ std::tuple<FlakeRef, std::string, ExtendedOutputsSpec> parseFlakeRefWithFragment
     return {std::move(flakeRef), fragment, std::move(extendedOutputsSpec)};
 }
 
-std::regex flakeIdRegex(flakeIdRegexS, std::regex::ECMAScript);
+const std::regex & flakeIdRegex()
+{
+    static const std::regex regex(flakeIdRegexS, std::regex::ECMAScript);
+    return regex;
+}
 
 } // namespace nix

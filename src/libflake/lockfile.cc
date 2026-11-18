@@ -310,7 +310,7 @@ InputAttrPath parseInputAttrPath(std::string_view s)
     InputAttrPath path;
 
     for (auto & elem : tokenizeString<std::vector<std::string>>(s, "/")) {
-        if (!std::regex_match(elem, flakeIdRegex))
+        if (!std::regex_match(elem, flakeIdRegex()))
             throw UsageError("invalid flake input attribute path element '%s'", elem);
         path.push_back(elem);
     }

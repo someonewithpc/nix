@@ -17,11 +17,11 @@ static const std::string fragmentRegex = "(?:" + pcharRegex + "|[/? \"^])*";
 /// \todo check that this is correct.
 /// This regex incomplete. See https://git-scm.com/docs/git-check-ref-format
 static const std::string refRegexS = "[a-zA-Z0-9@][a-zA-Z0-9_.\\/@+-]*";
-extern std::regex refRegex;
+const std::regex & refRegex();
 
 /// A Git revision (a SHA-1 commit hash).
 static const std::string revRegexS = "[0-9a-fA-F]{40}";
-extern std::regex revRegex;
+const std::regex & revRegex();
 
 /// A ref or revision, or a ref followed by a revision.
 static const std::string refAndOrRevRegex = "(?:(" + revRegexS + ")|(?:(" + refRegexS + ")(?:/(" + revRegexS + "))?))";

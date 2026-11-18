@@ -121,6 +121,6 @@ std::tuple<FlakeRef, std::string, ExtendedOutputsSpec> parseFlakeRefWithFragment
     bool isFlake = true);
 
 static const std::string flakeIdRegexS = "[a-zA-Z][a-zA-Z0-9_-]*";
-extern std::regex flakeIdRegex;
+const std::regex & flakeIdRegex();
 
 } // namespace nix

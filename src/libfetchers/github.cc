@@ -24,7 +24,11 @@ struct DownloadUrl
 
 // A github, gitlab, or sourcehut host
 static const std::string hostRegexS = "[a-zA-Z0-9.-]*"; // FIXME: check
-std::regex hostRegex(hostRegexS, std::regex::ECMAScript);
+static const std::regex & hostRegex()
+{
+    static const std::regex regex(hostRegexS, std::regex::ECMAScript);
+    return regex;
+}
 
 struct GitArchiveInputScheme : InputScheme
 {
@@ -43,7 +47,7 @@ struct GitArchiveInputScheme : InputScheme
 
         auto size = path.size();
         if (size == 3) {
-            if (std::regex_match(path[2], revRegex))
+            if (std::regex_match(path[2], revRegex()))
                 attrs.insert_or_assign("rev", path[2]);
             else
                 attrs.insert_or_assign("ref", path[2]);
@@ -142,7 +146,7 @@ struct GitArchiveInputScheme : InputScheme
         if (ref && !isLegalRefName(*ref))
             throw BadURL("input %s contains an invalid branch/tag name", attrsToJSON(attrs));
 
-        if (auto host = maybeGetStrAttr(attrs, "host"); host && !std::regex_match(*host, hostRegex))
+        if (auto host = maybeGetStrAttr(attrs, "host"); host && !std::regex_match(*host, hostRegex()))
             throw BadURL("input %s contains an invalid instance host", attrsToJSON(attrs));
 
         Input input{};

@@ -35,7 +35,7 @@ static void prim_fetchMercurial(EvalState & state, CallSite callSite, Value * co
                 // be both a revision or a branch/tag name.
                 auto value = state.forceStringNoCtx(
                     *attr.value, attr.pos, "while evaluating the `rev` attribute passed to builtins.fetchMercurial");
-                if (std::regex_match(value.begin(), value.end(), revRegex))
+                if (std::regex_match(value.begin(), value.end(), revRegex()))
                     rev = Hash::parseAny(value, HashAlgorithm::SHA1);
                 else
                     ref = value;

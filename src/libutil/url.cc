@@ -14,8 +14,17 @@ namespace nix {
 
 void BadURL::anchor() {}
 
-std::regex refRegex(refRegexS, std::regex::ECMAScript);
-std::regex revRegex(revRegexS, std::regex::ECMAScript);
+const std::regex & refRegex()
+{
+    static const std::regex regex(refRegexS, std::regex::ECMAScript);
+    return regex;
+}
+
+const std::regex & revRegex()
+{
+    static const std::regex regex(revRegexS, std::regex::ECMAScript);
+    return regex;
+}
 
 ParsedURL::Authority ParsedURL::Authority::parse(std::string_view encodedAuthority)
 {

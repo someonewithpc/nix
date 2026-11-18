@@ -65,7 +65,6 @@ void StructuredAttrs::checkKeyNotInUse(const StringPairs & env)
             "Cannot have an environment variable named '__json'. This key is reserved for encoding structured attrs");
 }
 
-static std::regex shVarName("[A-Za-z_][A-Za-z0-9_]*");
 
 /**
  * Write a JSON representation of store object metadata, such as the
@@ -165,6 +164,8 @@ std::string StructuredAttrs::writeShell(const nlohmann::json::object_t & json)
     };
 
     std::string jsonSh;
+
+    static const std::regex shVarName("[A-Za-z_][A-Za-z0-9_]*");
 
     for (auto & [key, value] : json) {
 

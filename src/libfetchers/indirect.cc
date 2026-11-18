@@ -5,7 +5,11 @@
 
 namespace nix::fetchers {
 
-std::regex flakeRegex("[a-zA-Z][a-zA-Z0-9_-]*", std::regex::ECMAScript);
+static const std::regex & flakeRegex()
+{
+    static const std::regex regex("[a-zA-Z][a-zA-Z0-9_-]*", std::regex::ECMAScript);
+    return regex;
+}
 
 struct IndirectInputScheme : InputScheme
 {
@@ -22,7 +26,7 @@ struct IndirectInputScheme : InputScheme
 
         if (path.size() == 1) {
         } else if (path.size() == 2) {
-            if (std::regex_match(path[1], revRegex))
+            if (std::regex_match(path[1], revRegex()))
                 rev = Hash::parseAny(path[1], HashAlgorithm::SHA1);
             else if (isLegalRefName(path[1]))
                 ref = path[1];
@@ -32,14 +36,14 @@ struct IndirectInputScheme : InputScheme
             if (!isLegalRefName(path[1]))
                 throw BadURL("in flake URL '%s', '%s' is not a branch/tag name", url, path[1]);
             ref = path[1];
-            if (!std::regex_match(path[2], revRegex))
+            if (!std::regex_match(path[2], revRegex()))
                 throw BadURL("in flake URL '%s', '%s' is not a commit hash", url, path[2]);
             rev = Hash::parseAny(path[2], HashAlgorithm::SHA1);
         } else
             throw BadURL("GitHub URL '%s' is invalid", url);
 
         std::string id = path[0];
-        if (!std::regex_match(id, flakeRegex))
+        if (!std::regex_match(id, flakeRegex()))
             throw BadURL("'%s' is not a valid flake ID", id);
 
         // FIXME: forbid query params?
@@ -92,7 +96,7 @@ struct IndirectInputScheme : InputScheme
     std::optional<Input> inputFromAttrs(const Attrs & attrs) const override
     {
         auto id = getStrAttr(attrs, "id");
-        if (!std::regex_match(id, flakeRegex))
+        if (!std::regex_match(id, flakeRegex()))
             throw BadURL("'%s' is not a valid flake ID", id);
 
         Input input{};
