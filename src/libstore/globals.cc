@@ -592,6 +592,7 @@ void initLibStore(bool loadConfig)
 
     preloadNSS();
 
+#ifdef __APPLE__
     /* Because of an objc quirk[1], calling curl_global_init for the first time
        after fork() will always result in a crash.
        Up until now the solution has been to set OBJC_DISABLE_INITIALIZE_FORK_SAFETY
@@ -604,7 +605,7 @@ void initLibStore(bool loadConfig)
        https://github.com/apple-oss-distributions/objc4/blob/01edf1705fbc3ff78a423cd21e03dfc21eb4d780/runtime/objc-initialize.mm#L614-L636
     */
     curl_global_init(CURL_GLOBAL_ALL);
-#ifdef __APPLE__
+
     /* On macOS, don't use the per-session TMPDIR (as set e.g. by
        sshd). This breaks build users because they don't have access
        to the TMPDIR, in particular in ‘nix-store --serve’. */
