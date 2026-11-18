@@ -100,7 +100,7 @@ void Config::getSettings(std::map<std::string, SettingInfo> & res, bool overridd
                 opt.first,
                 SettingInfo{
                     opt.second.setting->to_string(),
-                    opt.second.setting->description,
+                    opt.second.setting->description(),
                     opt.second.setting->excludedFromFullSerialisation()});
 }
 
@@ -240,10 +240,15 @@ AbstractSetting::AbstractSetting(
     const StringSet & aliases,
     std::optional<ExperimentalFeature> experimentalFeature)
     : name(name)
-    , description(stripIndentation(description))
     , aliases(aliases)
     , experimentalFeature(std::move(experimentalFeature))
+    , rawDescription(description)
 {
+}
+
+std::string AbstractSetting::description() const
+{
+    return stripIndentation(rawDescription);
 }
 
 AbstractSetting::~AbstractSetting()
@@ -261,7 +266,7 @@ nlohmann::json AbstractSetting::toJSON()
 std::map<std::string, nlohmann::json> AbstractSetting::toJSONObject() const
 {
     std::map<std::string, nlohmann::json> obj;
-    obj.emplace("description", description);
+    obj.emplace("description", description());
     obj.emplace("aliases", aliases);
     if (experimentalFeature)
         obj.emplace("experimentalFeature", *experimentalFeature);

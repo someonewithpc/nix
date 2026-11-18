@@ -189,7 +189,6 @@ class AbstractSetting
 public:
 
     const std::string name;
-    const std::string description;
     const StringSet aliases;
 
     int created = 123;
@@ -200,10 +199,20 @@ public:
 
     bool isOverridden() const;
 
+    std::string description() const;
+
     virtual bool excludedFromFullSerialisation() const
     {
         return false;
     }
+
+private:
+
+    /**
+     * Kept as written and indented on demand, since most processes never
+     * show a setting's documentation.
+     */
+    const std::string rawDescription;
 
 protected:
 
