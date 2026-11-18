@@ -176,9 +176,145 @@ void RemoteStore::ConnectionHandle::processStderr(Sink * sink, Source * source, 
     handle->processStderr(&daemonException, sink, source, flush, block);
 }
 
+/**
+ * Set by the operations that check their own paths against the queued
+ * derivation writes, and need `getConnection` not to flush them all.
+ */
+static thread_local unsigned int pathsChecked = 0;
+
+namespace {
+struct PathsChecked
+{
+    PathsChecked()
+    {
+        ++pathsChecked;
+    }
+
+    ~PathsChecked()
+    {
+        --pathsChecked;
+    }
+};
+} // namespace
+
 RemoteStore::ConnectionHandle RemoteStore::getConnection()
 {
+    if (!pathsChecked)
+        flushDerivationWrites();
     return ConnectionHandle(connections->get());
+}
+
+void RemoteStore::writeDerivationText(
+    const StorePath & path, std::string_view contents, const StorePathSet & references, RepairFlag repair)
+{
+    if (repair) {
+        flushDerivationWrites();
+        Store::writeDerivationText(path, contents, references, repair);
+        return;
+    }
+
+    {
+        auto pending(pendingDerivations.lock());
+        if (!pending->paths.insert(path).second)
+            return;
+        pending->bytes += contents.size();
+        pending->drvs.push_back({path, std::string{contents}, references});
+        havePendingDerivations = true;
+        if (pending->drvs.size() < 4096 && pending->bytes < 32 * 1024 * 1024)
+            return;
+    }
+
+    flushDerivationWrites();
+}
+
+bool RemoteStore::hasPendingDerivation(const StorePathSet & paths)
+{
+    if (!havePendingDerivations)
+        return false;
+    auto pending(pendingDerivations.lock());
+    if (pending->flushing)
+        return true;
+    for (auto & path : paths)
+        if (pending->paths.contains(path))
+            return true;
+    return false;
+}
+
+void RemoteStore::flushDerivationWrites(const StorePath & path)
+{
+    if (hasPendingDerivation({path}))
+        flushDerivationWrites();
+}
+
+void RemoteStore::flushDerivationWrites()
+{
+    /* The flush itself uses connections. */
+    static thread_local RemoteStore * flushing = nullptr;
+
+    if (!havePendingDerivations || flushing == this)
+        return;
+
+    std::lock_guard lock(flushDerivationsMutex);
+
+    flushing = this;
+    PendingDerivations batch;
+    {
+        auto pending(pendingDerivations.lock());
+        std::swap(batch, *pending);
+        pending->flushing = true;
+    }
+    Finally done([&] {
+        flushing = nullptr;
+        auto pending(pendingDerivations.lock());
+        pending->flushing = false;
+        if (pending->drvs.empty())
+            havePendingDerivations = false;
+    });
+
+    if (batch.drvs.empty())
+        return;
+
+    /* What `Store::writeDerivationText` does for each, in the same
+       order, but with one round trip for all the temp roots and a few
+       for the validity checks. These are `IsValidPath` sent without
+       waiting for each answer, rather than `QueryValidPaths`, which a
+       daemon serving a builder refuses. Chunks keep the answers from
+       filling the socket buffer before we read them. */
+    addTempRoots(batch.paths);
+
+    StorePathSet valid;
+    {
+        auto conn(getConnection());
+        auto it = batch.paths.begin();
+        while (it != batch.paths.end()) {
+            std::vector<StorePath> chunk;
+            for (; it != batch.paths.end() && chunk.size() < 256; ++it) {
+                conn->to << WorkerProto::Op::IsValidPath;
+                WorkerProto::write(*this, *conn, *it);
+                chunk.push_back(*it);
+            }
+            for (auto & path : chunk) {
+                conn.processStderr();
+                if (readInt(conn->from))
+                    valid.insert(path);
+            }
+        }
+    }
+
+    for (auto & drv : batch.drvs) {
+        if (valid.contains(drv.path))
+            continue;
+        StringSource s{drv.contents};
+        auto path2 = addToStoreFromDump(
+            s,
+            drv.path.name(),
+            FileSerialisationMethod::Flat,
+            ContentAddressMethod::Raw::Text,
+            HashAlgorithm::SHA256,
+            drv.references,
+            NoRepair);
+        assert(path2 == drv.path);
+    }
 }
 
 void RemoteStore::setOptions()
@@ -188,6 +324,8 @@ void RemoteStore::setOptions()
 
 bool RemoteStore::isValidPathUncached(const StorePath & path)
 {
+    flushDerivationWrites(path);
+    PathsChecked checked;
     auto conn(getConnection());
     conn->to << WorkerProto::Op::IsValidPath;
     WorkerProto::write(*this, *conn, path);
@@ -197,6 +335,9 @@ bool RemoteStore::isValidPathUncached(const StorePath & path)
 
 StorePathSet RemoteStore::queryValidPaths(const StorePathSet & paths, SubstituteFlag maybeSubstitute)
 {
+    if (hasPendingDerivation(paths))
+        flushDerivationWrites();
+    PathsChecked checked;
     auto conn(getConnection());
     return conn->queryValidPaths(*this, &conn.daemonException, paths, maybeSubstitute);
 }
@@ -248,6 +389,8 @@ void RemoteStore::queryPathInfoUncached(
     const StorePath & path, Callback<std::shared_ptr<const ValidPathInfo>> callback) noexcept
 {
     try {
+        flushDerivationWrites(path);
+        PathsChecked checked;
         auto info = ({
             auto conn(getConnection());
             conn->queryPathInfo(*this, &conn.daemonException, path);
@@ -343,6 +486,9 @@ ref<const ValidPathInfo> RemoteStore::addCAToStore(
     const StorePathSet & references,
     RepairFlag repair)
 {
+    if (hasPendingDerivation(references))
+        flushDerivationWrites();
+    PathsChecked checked;
     std::optional<ConnectionHandle> conn_(getConnection());
     auto & conn = *conn_;
 
@@ -752,6 +898,8 @@ void RemoteStore::addTempRoots(const StorePathSet & paths)
     if (paths.empty())
         return;
 
+    /* A temp root needs no store object behind it. */
+    PathsChecked checked;
     auto conn(getConnection());
 
     if (conn->protoVersion.features.contains(WorkerProto::featureAddTempRoots)) {

@@ -3,6 +3,7 @@
 
 #include <limits>
 #include <set>
+#include <mutex>
 #include <string>
 
 #include "nix/store/store-api.hh"
@@ -130,6 +131,22 @@ public:
 
     void addTempRoots(const StorePathSet & paths) override;
 
+    /**
+     * Queues the write. The queue is sent in a few round trips (temp
+     * roots, a validity check, the missing derivations in order) when it
+     * grows large, before an operation on a queued path, and before any
+     * operation that could read one without naming it.
+     */
+    void writeDerivationText(
+        const StorePath & path,
+        std::string_view contents,
+        const StorePathSet & references,
+        RepairFlag repair = NoRepair) override;
+
+    void flushDerivationWrites() override;
+
+    void flushDerivationWrites(const StorePath & path) override;
+
     Roots findRoots(bool censor) override;
 
     void collectGarbage(const GCOptions & options, GCResults & results) override;
@@ -204,6 +221,39 @@ private:
     ref<RemoteFSAccessor> getRemoteFSAccessor(bool requireValidPath = true);
 
     std::atomic_bool failed{false};
+
+    struct PendingDerivation
+    {
+        StorePath path;
+        std::string contents;
+        StorePathSet references;
+    };
+
+    struct PendingDerivations
+    {
+        std::vector<PendingDerivation> drvs;
+        StorePathSet paths;
+        size_t bytes = 0;
+        /**
+         * A batch taken out of `drvs` is being written.
+         */
+        bool flushing = false;
+    };
+
+    /**
+     * Whether `paths` has a queued write, or one being written.
+     */
+    bool hasPendingDerivation(const StorePathSet & paths);
+
+    Sync<PendingDerivations> pendingDerivations;
+
+    /**
+     * Set while `pendingDerivations` is not empty or being flushed, so
+     * that other threads wait for the flush before using a connection.
+     */
+    std::atomic_bool havePendingDerivations{false};
+
+    std::mutex flushDerivationsMutex;
 
     /**
      * Track all active connection file descriptors (both idle and in-use).

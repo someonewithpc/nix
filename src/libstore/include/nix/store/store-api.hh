@@ -923,6 +923,19 @@ public:
         RepairFlag repair = NoRepair);
 
     /**
+     * Finish the writes `writeDerivationText` left queued, if any. Stores
+     * that queue them do this themselves before anything that could read
+     * the store; callers call it where a write error should surface.
+     */
+    virtual void flushDerivationWrites() {}
+
+    /**
+     * Like `flushDerivationWrites`, but only when the write of `path` is
+     * queued.
+     */
+    virtual void flushDerivationWrites(const StorePath & path) {}
+
+    /**
      * Read a derivation (which must already be valid).
      */
     virtual Derivation readDerivation(const StorePath & drvPath);

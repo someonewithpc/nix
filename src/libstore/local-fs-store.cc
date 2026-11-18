@@ -51,6 +51,8 @@ public:
 
     void requireStoreObject(const StorePath & storePath)
     {
+        /* Reading the file system bypasses the daemon. */
+        store->flushDerivationWrites(storePath);
         if (requireValidPath && !store->isValidPath(storePath))
             throw InvalidPath("path '%1%' is not a valid store path", store->printStorePath(storePath));
     }

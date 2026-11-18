@@ -107,7 +107,8 @@ void StoreCommand::run(ref<StoreConfig> storeConfig)
     // of getStore. The StoreConfig in both cases should be the same, though.
     auto store = getStore();
     assert(&*storeConfig == &store->config);
-    run(std::move(store));
+    run(store);
+    store->flushDerivationWrites();
 }
 
 CopyCommand::CopyCommand()

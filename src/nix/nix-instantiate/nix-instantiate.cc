@@ -202,6 +202,8 @@ static int main_nix_instantiate(int argc, char ** argv)
                 *state, attrPaths, parseOnly, strict, autoArgs, evalOnly, outputKind, xmlOutputSourceLocation, e);
         }
 
+        state->store->flushDerivationWrites();
+
         state->maybePrintStats();
 
         return 0;

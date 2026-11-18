@@ -598,6 +598,13 @@ EvalState::~EvalState()
 {
     /* Its threads use the rest of the state */
     importPrefetcher.reset();
+
+    /* For callers that never get to flush them themselves. */
+    try {
+        store->flushDerivationWrites();
+    } catch (...) {
+        ignoreExceptionInDestructor();
+    }
 }
 
 void EvalState::allowPathLegacy(const std::string & path)
