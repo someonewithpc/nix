@@ -2,7 +2,8 @@
 // usage: parse-bench <file-list> [reps] [--dump <out-file>] [--threads <n>]
 //
 // With --threads, each rep parses and binds every file on n threads sharing
-// one EvalState, largest files first, and reports wall time
+// one EvalState, largest files first, and reports wall time. A serial
+// --dump ends with the symbol table in id order
 #include "nix/expr/eval.hh"
 #include "nix/expr/eval-gc.hh"
 #include "nix/expr/eval-settings.hh"
@@ -225,6 +226,13 @@ int main(int argc, char ** argv)
                 }
             }
         }
+    }
+
+    /* Ids follow interning order, which orders attribute sets, so a serial
+       run must intern in Bison's order */
+    if (dump.is_open()) {
+        dump << "=== symbols\n";
+        state.symbols.dump([&](const SymbolValue & v) { dump << SymbolStr(v) << "\n"; });
     }
 
     double mb = bytes / 1e6;
