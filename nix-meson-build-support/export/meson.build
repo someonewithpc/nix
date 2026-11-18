@@ -14,12 +14,20 @@ extra_pkg_config_variables = get_variable('extra_pkg_config_variables', {})
 fs = import('fs')
 plugin_c_api_enabled = get_variable('plugin_c_api_enabled', false)
 
+# default_library=both also builds the static libraries that the
+# `static-nix-libraries` option of `nix` links
+build_both_libraries = plugin_c_api_enabled or get_option('default_library') == 'both'
+
 if plugin_c_api_enabled
   this_libraries = get_variable('this_libraries')
+else
+  this_libraries = get_variable('this_library')
+endif
+if build_both_libraries
   this_library = this_libraries.get_shared_lib()
   this_static_library = this_libraries.get_static_lib()
 else
-  this_library = get_variable('this_library')
+  this_library = this_libraries
 endif
 
 extra_cflags = []
@@ -29,11 +37,11 @@ endif
 
 whole_archive_dep_name = meson.project_name() + '-whole-archive'
 installed_whole_archive_link_arg = ''
-if plugin_c_api_enabled and host_machine.system() == 'darwin'
+if build_both_libraries and host_machine.system() == 'darwin'
   installed_whole_archive_link_arg = '-Wl,-force_load,${libdir}/' + fs.name(
     this_static_library.full_path(),
   )
-elif plugin_c_api_enabled and not host_machine.system().startswith('windows')
+elif build_both_libraries and not host_machine.system().startswith('windows')
   installed_whole_archive_link_arg = '-Wl,--whole-archive,${libdir}/' + fs.name(
     this_static_library.full_path(),
   ) + ',--no-whole-archive'
@@ -54,15 +62,22 @@ import('pkgconfig').generate(
   variables : extra_pkg_config_variables,
 )
 
+whole_archive_external_deps = []
+foreach dep : deps_public_no_pkgconfig + deps_private_no_pkgconfig
+  if dep.type_name() != 'internal'
+    whole_archive_external_deps += dep
+  endif
+endforeach
+
 if installed_whole_archive_link_arg != ''
   import('pkgconfig').generate(
     filebase : whole_archive_dep_name,
     name : 'Nix whole-archive static dependency',
     description : 'Force-load static Nix C API archive into the host executable',
     extra_cflags : extra_cflags,
-    requires : requires_public,
-    requires_private : requires_private,
-    libraries : [ installed_whole_archive_link_arg ],
+    # The executable links what the archive needs, private dependencies too
+    requires : requires_public + requires_private,
+    libraries : [ installed_whole_archive_link_arg ] + whole_archive_external_deps,
     variables : extra_pkg_config_variables,
   )
 endif
