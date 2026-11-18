@@ -817,11 +817,16 @@ struct GitInputScheme : InputScheme
 
     void verifyCommit(const Input & input, std::shared_ptr<GitRepo> repo) const
     {
+        verifyCommitLazily(input, [&] { return repo; });
+    }
+
+    void verifyCommitLazily(const Input & input, std::function<std::shared_ptr<GitRepo>()> getRepo) const
+    {
         auto publicKeys = getPublicKeys(input.attrs);
         auto verifyCommit = maybeGetBoolAttr(input.attrs, "verifyCommit").value_or(!publicKeys.empty());
 
         if (verifyCommit) {
-            if (input.getRev() && repo)
+            if (auto repo = input.getRev() ? getRepo() : nullptr)
                 repo->verifyCommit(*input.getRev(), publicKeys);
             else
                 throw Error(
@@ -1072,9 +1077,17 @@ struct GitInputScheme : InputScheme
         }
 
         if (!repoInfo.workdirInfo.isDirty) {
-            auto repo = GitRepo::openRepo(repoPath, {});
+            /* The workdir record holds the ref, so a clean tree opens
+               the repository only to verify a commit. */
+            std::shared_ptr<GitRepo> repo;
+            auto getRepo = [&]() -> std::shared_ptr<GitRepo> {
+                if (!repo)
+                    repo = GitRepo::openRepo(repoPath, {});
+                return repo;
+            };
 
-            if (auto ref = repo->getWorkdirRef())
+            auto ref = repoInfo.workdirInfo.headRef ? *repoInfo.workdirInfo.headRef : getRepo()->getWorkdirRef();
+            if (ref)
                 input.attrs.insert_or_assign("ref", *ref);
 
             /* Return a rev of 000... if there are no commits yet. */
@@ -1089,7 +1102,7 @@ struct GitInputScheme : InputScheme
                 }
             }
 
-            verifyCommit(input, repo);
+            verifyCommitLazily(input, getRepo);
         } else {
             repoInfo.warnDirty(settings);
 

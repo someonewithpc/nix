@@ -667,6 +667,11 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
                 info.submodules.push_back(Submodule{.path = entryPath});
         }
 
+        try {
+            info.headRef = getWorkdirRef();
+        } catch (Error &) {
+        }
+
         return info;
     }
 
@@ -1748,7 +1753,7 @@ static Sync<std::map<std::filesystem::path, GitRepo::WorkdirInfo>> workdirInfoCa
    so the record is not used then. */
 namespace {
 
-constexpr std::string_view workdirRecordVersion = "nix-git-workdir-1";
+constexpr std::string_view workdirRecordVersion = "nix-git-workdir-2";
 
 std::string statLine(const std::filesystem::path & path)
 {
@@ -1819,6 +1824,9 @@ std::optional<GitRepo::WorkdirInfo> readWorkdirRecord(const std::filesystem::pat
                 info.headRev = Hash::parseAny(key, key.size() == 64 ? HashAlgorithm::SHA256 : HashAlgorithm::SHA1);
             info.isDirty = value == "dirty";
             break;
+        case 'r':
+            info.headRef = key == "-" ? std::nullopt : std::optional<std::string>(value);
+            break;
         case 'g':
         case 'f':
         case 'm':
@@ -1857,6 +1865,11 @@ void writeWorkdirRecord(
 
     std::string text = fmt("%s\n%d\n", workdirRecordVersion, startTime);
     text += fmt("h %s\t%s\n", info.headRev ? info.headRev->gitRev() : "-", info.isDirty ? "dirty" : "clean");
+    if (info.headRef) {
+        if (*info.headRef && bad(**info.headRef))
+            return;
+        text += fmt("r %s\t%s\n", *info.headRef ? "=" : "-", info.headRef->value_or(""));
+    }
     for (auto & p : gitFiles) {
         if (bad(p.string()))
             return;

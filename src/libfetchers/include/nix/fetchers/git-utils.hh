@@ -75,6 +75,10 @@ struct GitRepo
 
         /* The submodules listed in .gitmodules of this workdir. */
         std::vector<Submodule> submodules;
+
+        /* What getWorkdirRef() returns, if it was looked up without an
+           error. */
+        std::optional<std::optional<std::string>> headRef;
     };
 
     virtual WorkdirInfo getWorkdirInfo() = 0;

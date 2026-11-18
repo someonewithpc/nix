@@ -203,3 +203,12 @@ git -C "$evalDir" add sub
 [[ $(nix eval "$subRef#sub") = '"sub-three\n"' ]]
 git -C "$evalDir" commit -m "Update submodule"
 [[ $(nix eval "$subRef#sub") = '"sub-three\n"' ]]
+
+# A clean tree takes its ref from the record, which a branch switch to the
+# same commit invalidates
+git -C "$evalDir" checkout -q other
+[[ $(nix flake metadata --json "$evalDir" | jq -r .locked.ref) = refs/heads/other ]]
+git -C "$evalDir" checkout -q -b same-commit
+[[ $(nix flake metadata --json "$evalDir" | jq -r .locked.ref) = refs/heads/same-commit ]]
+git -C "$evalDir" checkout -q --detach
+[[ $(nix flake metadata --json "$evalDir" | jq -r .locked.ref) = null ]]
