@@ -1925,8 +1925,30 @@ void GitRepo::invalidateWorkdirInfoCache()
     workdirInfoCache_.lock()->clear();
 }
 
+/* A subset of the names that libgit2 accepts as a branch name below,
+   recognised without initialising libgit2, which loads OpenSSL's
+   certificates */
+static bool isPlainBranchName(std::string_view name)
+{
+    if (name.empty() || name.size() > 255 || name[0] == '-' || name == "HEAD")
+        return false;
+    for (auto component : std::views::split(name, '/')) {
+        std::string_view c(component.begin(), component.end());
+        if (c.empty() || c.front() == '.' || c.back() == '.' || c.ends_with(".lock") || c.contains(".."))
+            return false;
+        for (auto ch : c)
+            if (!(ch >= 'a' && ch <= 'z') && !(ch >= 'A' && ch <= 'Z') && !(ch >= '0' && ch <= '9') && ch != '-'
+                && ch != '_' && ch != '.')
+                return false;
+    }
+    return true;
+}
+
 bool isLegalRefName(const std::string & refName)
 {
+    if (isPlainBranchName(refName))
+        return true;
+
     initLibGit2();
 
     /* Check for cases that don't get rejected by libgit2.
