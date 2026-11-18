@@ -354,6 +354,58 @@ a failed parse leaves nothing that reaches them. Bison's parser does the
 same. ASan and UBSan found nothing else in the corpus check, 6000
 attribute sets from `bench/gen-attrs.py` or 3000 fuzzed files
 
+### 2026-11-18 on beryllium: symbol order (F0)
+
+Symbol ids follow interning order and attribute sets are sorted by id, so
+the pieces of big sets and the import prefetcher, which interned names on
+their own threads, changed deepSeq, `==` and trace order from run to run.
+Both now intern the names the table lacks into a `LocalSymbols`, with ids
+that have the top bit set. The serial parse interns an accepted piece's
+names when it reaches the piece, and `ImportPrefetcher::take` interns a
+file's names before bindVars, where upstream parses it. Then
+`Expr::remapSymbols` puts in the table's ids and sorts sets and formals
+again. The order is Bison's by construction
+
+- `parse-bench --dump` now ends with the symbol table in id order, and
+  `check.sh` compares it on serial runs. Serial with one thread was already
+  equal to Bison on the corpus (5991 files present here). Before the fix,
+  the small-piece configuration differed in 120k symbol lines. After it,
+  all eight `check.sh` configurations match, and so do eight more runs
+  with chunk 64 and piece 8 on 8 threads
+- Reproducers in `tests/functional/lang`: `eval-okay-symbol-order-pieces`
+  (64 names in a set big enough to parse in pieces) and
+  `eval-okay-symbol-order-imports` (the a.nix/b.nix case). Before: 3 of 6
+  and 1 of 6 runs wrong. After: 200 runs each, none differ. A generated
+  case of 200 files sharing new names, forced in shuffled order
+  (`gen-prefetch.py` in the scratch dir), differed on every run before;
+  after, 100 runs each of three seeds with `NIX_PREFETCH_IMPORTS=8` match
+  base
+- T0 quick suites (lang, hello, nixos) with `-r 5`: 0 of 500 differ. T0's
+  lang suite reads its own checkout's tests, so it doesn't run the new ones
+- TSan: no reports on the corpus with chunk 64 and piece 8, serial and
+  `--threads 8`, on hello and minimal NixOS with `NIX_PREFETCH_IMPORTS=4`,
+  and on the reproducers
+- `tests/functional/lang` and `nix-expr-tests` pass
+
+Instructions (`perf stat -e instructions:u`, three interleaved runs, all
+threads, before is `fast-eval`):
+
+| workload | before | after |
+|---|---|---|
+| `hello.drvPath` | 1.123-1.125 G | 1.129 G (+0.5%) |
+| minimal NixOS | 19.96-20.02 G | 20.07-20.16 G (+0.6%) |
+| real system, `--read-only`, rev 19709e05 | 71.06-71.25 G | 71.13-71.27 G |
+| corpus parse-bench, serial | 2.823 G | 2.905 G (+2.9%) |
+| hackage-packages.nix, 3 parses | 2.88 G | 3.03 G (+5%) |
+
+With `NIX_PREFETCH_IMPORTS=0`, hello is 945 M both ways, so the cost is
+the remap. On hello, sampling puts the main thread's share of it
+(`remapSymbols`, `internLocalSymbols`) at about 0.5%. Big sets keep most
+of their speedup: hackage-packages.nix lex+parse is 33.5 ms before, 36 ms
+after, 64 ms serial. A piece of a parse that interns into the table may
+use any symbol it finds there, since that is the id the parse would use;
+counting only the static symbols as known made it 63 ms
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
