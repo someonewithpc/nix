@@ -1,0 +1,1 @@
+{ n ? "0" }: derivation { name = "a6-triv-${n}"; system = "x86_64-linux"; builder = "${builtins.storePath /nix/store/n8dj8jab4w99bi3yh19mg8xzdgqgvw1f-busybox-1.37.0}/bin/busybox"; args = [ "sh" "-c" "echo ${n} > $out" ]; preferLocalBuild = true; allowSubstitutes = false; }
