@@ -141,3 +141,25 @@ echo six >"$evalDir/data"
 expect 1 env NIX_ALLOW_EVAL=0 nix eval "$evalDir#drv.drvPath"
 [[ $(nix eval --raw "$evalDir#drv.drvPath") = $(nix eval --no-eval-cache --raw "$evalDir#drv.drvPath") ]]
 
+# Dirty trees with submodules are cached, and a submodule edit is a miss
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=protocol.file.allow
+export GIT_CONFIG_VALUE_0=always
+subDir="$TEST_ROOT/eval-cache-sub"
+createGitRepo "$subDir" ""
+echo sub-one >"$subDir/data"
+git -C "$subDir" add data
+git -C "$subDir" commit -m Init
+git -C "$evalDir" submodule add "$subDir" sub
+git -C "$evalDir" commit -m "Add submodule"
+echo three >"$evalDir/data"
+subRef="git+file://$evalDir?submodules=1"
+[[ $(nix eval "$subRef#sub") = '"sub-one\n"' ]]
+[[ $(NIX_ALLOW_EVAL=0 nix eval "$subRef#sub") = '"sub-one\n"' ]]
+nix eval "$evalDir#yes"
+NIX_ALLOW_EVAL=0 nix eval "$evalDir#yes"
+echo sub-two >"$evalDir/sub/data"
+expect 1 env NIX_ALLOW_EVAL=0 nix eval "$subRef#sub"
+[[ $(nix eval "$subRef#sub") = '"sub-two\n"' ]]
+# Without submodules=1 the submodule is an empty directory, so its files are not inputs
+NIX_ALLOW_EVAL=0 nix eval "$evalDir#yes"

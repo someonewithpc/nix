@@ -1143,7 +1143,7 @@ struct GitInputScheme : InputScheme
             return makeFingerprint(*rev);
         else {
             auto repoInfo = getRepoInfo(input);
-            if (auto repoPath = repoInfo.getPath(); repoPath && repoInfo.workdirInfo.submodules.empty()) {
+            if (auto repoPath = repoInfo.getPath()) {
                 /* Calculate a fingerprint that takes into account the
                    deleted and modified/added files. */
                 HashSink hashSink{HashAlgorithm::SHA512};
@@ -1155,6 +1155,24 @@ struct GitInputScheme : InputScheme
                 for (auto & file : repoInfo.workdirInfo.deletedFiles) {
                     writeString("deleted:", hashSink);
                     writeString(file.abs(), hashSink);
+                }
+                /* Follow getAccessorFromWorkdir(): a submodule is an
+                   empty directory unless it is fetched from its
+                   workdir. */
+                for (auto & submodule : repoInfo.workdirInfo.submodules) {
+                    writeString("submodule:", hashSink);
+                    writeString(submodule.path.abs(), hashSink);
+                    if (!getSubmodulesAttr(input) || submodule.url.empty())
+                        continue;
+                    fetchers::Attrs attrs;
+                    attrs.insert_or_assign("type", "git");
+                    attrs.insert_or_assign("url", (*repoPath / submodule.path.rel()).string());
+                    attrs.insert_or_assign("exportIgnore", Explicit<bool>{getExportIgnoreAttr(input)});
+                    attrs.insert_or_assign("submodules", Explicit<bool>{true});
+                    auto fingerprint = fetchers::Input::fromAttrs(std::move(attrs)).getFingerprint(store);
+                    if (!fingerprint)
+                        return std::nullopt;
+                    writeString(*fingerprint, hashSink);
                 }
                 return makeFingerprint(repoInfo.workdirInfo.headRev.value_or(nullRev))
                        + ";d=" + hashSink.finish().hash.to_string(HashFormat::Base16, false);
