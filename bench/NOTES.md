@@ -451,6 +451,46 @@ overlay written through the daemon (same drv path as base, closure of
 without context, `builtins.storePath` and `nix-instantiate` output that
 exists after exit
 
+### 2026-11-18 on beryllium: eval cache for target 1 (A1, A3)
+
+`nix eval /etc/nixos#nixosConfigurations.beryllium.config.system.build.toplevel.drvPath`
+now answers from the eval cache when nothing changed. Before, it evaluated
+in full on every run (9-17 s): `nix eval` never read the cache, and a dirty
+tree with a submodule had no fingerprint
+
+| Build | Hit, instructions | Hit, wall |
+|---|---|---|
+| A1 (`fe-a1-evalcache~4`) | 273 M | |
+| A1 and A3 | 157 M | 28.5 ms on `/etc/nixos`, 31.2 ms on a copy |
+| `nix eval --expr 1`, same build | 81 M | 18.4 ms |
+
+Wall times are hyperfine, 30 runs, at load 5. Instructions are
+`perf stat -e instructions:u -r 10`. A3 took out `git status` (49 M) and
+the libgit2 and OpenSSL init (46 M), which a ref name check in the lock
+file's GitHub inputs pulled in
+
+Where the 157 M go: ld.so 45% (A2's), lockFlake 18% (lock file JSON 5%),
+the import prefetcher's two threads parsing what flake.nix imports 8%
+(wasted on a hit), the workdir record 5%, the eval cache's SQLite 4%
+
+How it was checked:
+
+- Hits print what `--no-eval-cache` prints on stdout. On stderr they drop
+  the evaluation's traces and warnings, as upstream's cache does. A cached
+  failure evaluates again and prints the same error as the base build
+- Edits on a copy of `/etc/nixos` (`edit-tests.sh` in the agent's scratch
+  directory): appending to a module, a same-size edit of a module, a
+  same-size edit of flake.lock and an edit in `secrets` with
+  `?submodules=1` are misses, and the next answer equals a fresh eval.
+  Without `submodules=1` the submodule is an empty directory to the flake,
+  so an edit there is a hit and still equals a fresh eval
+- `tests/functional/flakes/eval-cache.sh` gained cases for strings, paths,
+  big integers, Booleans, a deleted `.drv`, dirty edits with the same size
+  and mtime, `touch`, `git stash`, branch switches and submodule updates
+- Suites flakes, git and git-hashing, lang, the fetchGit tests and the
+  fetchers, expr and flake unit tests: 52 passed, 0 failed, lang-gc
+  skipped. T0 quick suites against base: 0 of 500 differ
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
