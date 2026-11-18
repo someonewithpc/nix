@@ -491,6 +491,29 @@ How it was checked:
   fetchers, expr and flake unit tests: 52 passed, 0 failed, lang-gc
   skipped. T0 quick suites against base: 0 of 500 differ
 
+### 2026-11-18 on beryllium: build path (A6)
+
+Full survey in `bench/BUILD-PATH.md`, probes in `bench/scripts/a6/`. The
+97 M instructions per trivial local build were the host's cachix
+post-build hook: Nix itself spends about 2.6 M user instructions and
+10 ms of kernel time per build on a chroot store, the hook about 87 M.
+A spooling hook for `/etc/nixos` is proposed in
+`bench/a6-proposals/cachix-spool.patch`, not applied
+
+- Substituters are asked for a path at once: `nix build --dry-run` with
+  5 misses over 4 substituters went from 1165-1358 ms to 622-806 ms
+- The post-build hook gets its environment through `execvpe`: 244.2 M to
+  231.6 M instructions for 13 builds with an `exit 0` hook
+- `loadDerivation` reads from the store it found the drv in: 384.4 M to
+  373.5 M for a build with 800 built inputs
+
+Tests: `meson test --suite main --suite ca --suite libstore-tests`,
+152 passed, 4 failed, 6 skipped. The 3 HTTPS store tests in
+`nix-store-tests` fail on the session's `HTTPS_PROXY` and pass without
+it. `build-remote-trustless-should-fail-0`, `-should-pass-2` and
+`-should-pass-3` fail on "File name too long" for a lock file named
+after this worktree's path, before any of the changed code runs
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
@@ -502,3 +525,6 @@ How it was checked:
 - Shrink the parser's symbol cache or its entries: the probe misses
   cache on 37% of its samples once the table outgrows L2
 - Build and test NEON under qemu-aarch64
+- Decide on the cachix spool hook (`bench/a6-proposals/cachix-spool.patch`)
+- Kernel time per sandboxed build (10 ms) and per input path (0.07-0.13
+  ms) need kernel profiles, which `perf_event_paranoid` 2 rules out
