@@ -261,6 +261,7 @@ struct ImportPrefetcher
         Expr * e = nullptr;
         ref<DocCommentMap> docComments = make_ref<DocCommentMap>();
         std::vector<SourcePath> imports;
+        std::unique_ptr<LocalSymbols> names;
     };
 
     EvalState & state;
@@ -272,6 +273,10 @@ struct ImportPrefetcher
     std::unordered_map<SourcePath, std::shared_ptr<File>> files;
     bool stop = false;
     std::vector<std::thread> threads;
+    /* The size of the symbol table, stored by the evaluator's thread, which
+       is the only one that adds to it while the prefetcher runs. Every
+       symbol below it is in the table for the threads that load it */
+    std::atomic<uint32_t> knownSymbols;
 
     /* NIX_PREFETCH_IMPORTS threads, or none to turn it off */
     static unsigned threadCount()
@@ -283,6 +288,7 @@ struct ImportPrefetcher
 
     ImportPrefetcher(EvalState & state, unsigned n)
         : state(state)
+        , knownSymbols(state.symbols.size() + 1)
     {
         for (unsigned i = 0; i < n; i++)
             threads.emplace_back([this] { work(); });
@@ -303,6 +309,7 @@ struct ImportPrefetcher
     {
         if (paths.empty())
             return;
+        knownSymbols.store(state.symbols.size() + 1, std::memory_order_release);
         {
             std::lock_guard lock(m);
             for (auto & p : paths)
@@ -329,6 +336,8 @@ struct ImportPrefetcher
         std::unique_lock lock(f->m);
         f->cv.wait(lock, [&] { return f->done; });
         lock.unlock();
+        if (f->e)
+            internLocalSymbols(f->e, *f->names, state.symbols);
         add(f->imports);
         docComments = f->docComments;
         return f->e;
@@ -404,6 +413,7 @@ struct ImportPrefetcher
         for (size_t i = 0; i < claimed.size(); i++) {
             auto & f = *claimed[i];
             Expr * e = nullptr;
+            f.names = std::make_unique<LocalSymbols>(knownSymbols.load(std::memory_order_acquire));
             if (auto buf = std::get_if<ParseBuffer>(&buffers[i]))
                 try {
                     e = parseExprFromBuf(
@@ -417,7 +427,8 @@ struct ImportPrefetcher
                         *f.docComments,
                         state.rootFS,
                         &f.imports,
-                        true);
+                        true,
+                        f.names.get());
                 } catch (...) {
                 }
             /* The parse needs the buffer no longer */
