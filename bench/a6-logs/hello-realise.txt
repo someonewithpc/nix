@@ -1,0 +1,47 @@
+1476082.5 1476323.6    241.1  queryPathInfo  querying info about '/nix/store/wn8g7rakp03q1qy2pd6yszwxs8spj1ka-activate' on 'https://cache.nixos.org'
+1476095.5 1476323.7    228.2  fileTransfer   downloading 'https://cache.nixos.org/wn8g7rakp03q1qy2pd6yszwxs8spj1ka.narinfo'
+1477174.4 1477438.8    264.5  queryPathInfo  querying info about '/nix/store/wn8g7rakp03q1qy2pd6yszwxs8spj1ka-activate' on 'https://someonewithpc.cachix.or
+1477176.0 1477438.9    262.9  fileTransfer   downloading 'https://someonewithpc.cachix.org/wn8g7rakp03q1qy2pd6yszwxs8spj1ka.narinfo'
+1477438.9 1477762.8    323.9  queryPathInfo  querying info about '/nix/store/wn8g7rakp03q1qy2pd6yszwxs8spj1ka-activate' on 'https://cache.nixos-cuda.org'
+1477438.9 1477762.9    324.0  fileTransfer   downloading 'https://cache.nixos-cuda.org/wn8g7rakp03q1qy2pd6yszwxs8spj1ka.narinfo'
+1478260.8 1478533.1    272.3  substitute     /nix/store/sd779x86bjaqxj2lzh2jsir4h0zjz6d1-hello-2.12.3 https://cache.nixos.org
+1478263.8 1478533.1    269.3  copyPath       copying path '/nix/store/sd779x86bjaqxj2lzh2jsir4h0zjz6d1-hello-2.12.3' from 'https://cache.nixos.org'
+1478426.2 1478503.8     77.6  fileTransfer   downloading 'https://cache.nixos.org/nar/1y5kxwvk55lwqfb1qrb8v5ap2kx638w1m65vh80gi9xp8ad4y0cr.nar.zst'
+1480208.8 1500229.9  20021.1  build          building '/nix/store/5gjby2a96b1j9nnv205i5c851p296yqk-system-path.drv'
+1499927.6 1500229.5    301.9  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1503787.2 1504851.3   1064.1  build          building '/nix/store/bcj44rsnhkw4y2ccs91vf3v8p7z7wdf9-X-Restart-Triggers-polkit.drv'
+1504036.4 1504852.4    816.0  build          building '/nix/store/shp7qqlnlwvlx5qn7lih4m60v6n5fg0d-dbus-1.drv'
+1504204.0 1506167.4   1963.3  build          building '/nix/store/fl3lrswvhjwybjh35a57gnaxxx0sngy9-unit-accounts-daemon.service.drv'
+1504351.2 1504850.7    499.6  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1504548.4 1504851.6    303.1  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1504843.9 1506166.9   1323.0  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1505746.8 1506333.8    586.9  build          building '/nix/store/q3zsd4j70735wyn6ay6hn6scnba287vc-X-Restart-Triggers-dbus-broker.drv'
+1505971.6 1507089.4   1117.8  build          building '/nix/store/35nyiy3aa5zpym56ziy7h6kry0c581y9-unit-polkit.service.drv'
+1506162.7 1506333.1    170.4  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1506330.7 1507088.9    758.2  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1506776.7 1507222.8    446.1  build          building '/nix/store/a9hgri3ynjh703rdq90vghz18wl99218-unit-dbus-broker.service.drv'
+1506952.6 1509524.0   2571.4  build          building '/nix/store/ldxigddpyndx7hfia1wbqa44iwymdvl1-unit-dbus-broker.service.drv'
+1507086.7 1507222.2    135.5  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1507220.7 1509524.0   2303.2  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1509523.9 1512901.7   3377.8  build          building '/nix/store/6z22rfi2njfjrs0cggp7a8lv84yzs379-system-units.drv'
+1509951.1 1510686.4    735.3  build          building '/nix/store/xksdqr05gnvc2kx9bj3va4zg6g0im03g-user-units.drv'
+1510604.9 1510685.6     80.7  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1512707.7 1512901.0    193.3  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1513412.2 1515274.1   1861.9  build          building '/nix/store/c6kzdwrmxmfzq2n0k32m6i5m9kvd1jpd-etc.drv'
+1515227.6 1515273.8     46.2  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1515791.1 1516164.2    373.0  build          building '/nix/store/yhv15sfl48p25i4bawkwz257ziyn28np-activate.drv'
+1516104.5 1516162.7     58.1  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+1517033.1 1517432.9    399.8  build          building '/nix/store/avql3j8yvzb0ha2q4p5gpps9g7dzxr27-nixos-system-beryllium-26.11.20261111.d4f25a3.drv'
+1517343.7 1517431.8     88.1  postBuildHook  running post-build-hook '/nix/store/g7fpn2q96akxyk88ifvgzh45ykz540x7-cachix-push-hook'
+
+total 1517435.9 ms
+  unknown           1 activities,    1877.5 ms summed
+  copyPath          1 activities,     269.3 ms summed
+  fileTransfer      4 activities,     892.8 ms summed
+  realise           1 activities,   39650.2 ms summed
+  copyPaths         1 activities,   39650.2 ms summed
+  builds            1 activities,   39650.2 ms summed
+  build            13 activities,   35334.8 ms summed
+  substitute        1 activities,     272.3 ms summed
+  queryPathInfo     3 activities,     829.5 ms summed
+  postBuildHook    13 activities,    6261.3 ms summed
