@@ -57,6 +57,7 @@ headers = [ config_pub_h ] + files(
   'hilite.hh',
   'json-impls.hh',
   'json-non-null.hh',
+  'json-text.hh',
   'json-utils.hh',
   'library-versions.hh',
   'logging.hh',

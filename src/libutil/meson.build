@@ -190,6 +190,7 @@ sources = [ config_priv_h ] + files(
   'git.cc',
   'hash.cc',
   'hilite.cc',
+  'json-text.cc',
   'json-utils.cc',
   'library-versions.cc',
   'logging.cc',

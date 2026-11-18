@@ -123,3 +123,44 @@ TEST_F(JSONValueTest, ToStringAcceptsExternal)
     ASSERT_EQ(getJSONValue(vAttrs), "\"external-json\"");
 }
 } /* namespace nix */
+
+namespace nix {
+
+class JSONTextTest : public LibExprTest
+{};
+
+TEST_F(JSONTextTest, textMatchesTree)
+{
+    for (auto expr : {
+             "null",
+             "[ 1 2.5 1.0e21 0.1 (-0.0) 9223372036854775807 (-9223372036854775807) ]",
+             "{ b = { y = true; x = false; }; a = [ ]; \"\" = { }; }",
+             "{ outPath = \"/foo\"; }",
+             "{ outPath.foo = true; }",
+             "{ __toString = self: \"str\"; }",
+             "{ x = \"\\n\\t\\r\\\"\\\\ \\u0001 é € 😀\"; }",
+             "[ (builtins.substring 0 1 \"é\") (builtins.substring 1 1 \"é\") ]",
+             "{ ${builtins.substring 0 1 \"é\"} = 1; }",
+             "{ z = (builtins.substring 0 2 \"€\"); a = \"ok\"; }",
+         }) {
+        auto v = eval(expr);
+        NixStringContext c1, c2;
+        auto tree = printValueAsJSON(state, true, v, noPos, c1);
+        JSONTextWriter text;
+        printValueAsJSON(state, true, v, noPos, text, c2);
+        try {
+            auto expected = tree.dump();
+            text.check();
+            EXPECT_EQ(text.text(), expected) << expr;
+        } catch (nlohmann::json::exception & e) {
+            EXPECT_THROW(text.check(), nlohmann::json::exception) << expr;
+            try {
+                text.check();
+            } catch (nlohmann::json::exception & e2) {
+                EXPECT_EQ(std::string(e2.what()), std::string(e.what())) << expr;
+            }
+        }
+    }
+}
+
+} // namespace nix
