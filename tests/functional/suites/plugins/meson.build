@@ -5,17 +5,19 @@ dl_dep = cpp.find_library('dl', required : false)
 plugin_test_deps = []
 plugin_tests = []
 
-libplugintest = shared_module(
-  'plugintest',
-  'src/plugintest.cc',
-  dependencies : [
-    dependency('nix-expr'),
-  ],
-  build_by_default : false,
-)
+if not get_option('static-nix-libraries')
+  libplugintest = shared_module(
+    'plugintest',
+    'src/plugintest.cc',
+    dependencies : [
+      dependency('nix-expr'),
+    ],
+    build_by_default : false,
+  )
 
-plugin_tests += [ 'register-setting-and-primop.sh' ]
-plugin_test_deps += [ libplugintest ]
+  plugin_tests += [ 'register-setting-and-primop.sh' ]
+  plugin_test_deps += [ libplugintest ]
+endif
 
 if get_option('plugin-c-api') and not host_machine.system().startswith('windows')
   libplugintest_dlsym = shared_module(

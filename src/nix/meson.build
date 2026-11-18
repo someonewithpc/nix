@@ -18,15 +18,25 @@ subdir('nix-meson-build-support/deps-lists')
 
 nix_store = dependency('nix-store')
 
-deps_private_maybe_subproject = [
-  dependency('nix-util'),
-  nix_store,
-  dependency('nix-expr'),
-  dependency('nix-flake'),
-  dependency('nix-fetchers'),
-  dependency('nix-main'),
-  dependency('nix-cmd'),
-]
+if get_option('static-nix-libraries')
+  deps_private_maybe_subproject = []
+  # A library's archive goes before the libraries that require it. Their
+  # pkg-config files name its shared library, which the linker would mark
+  # as needed if it came first
+  foreach name : [ 'util', 'store', 'fetchers', 'expr', 'flake', 'main', 'cmd' ]
+    deps_private_maybe_subproject += dependency('nix-' + name + '-whole-archive')
+  endforeach
+else
+  deps_private_maybe_subproject = [
+    dependency('nix-util'),
+    nix_store,
+    dependency('nix-expr'),
+    dependency('nix-flake'),
+    dependency('nix-fetchers'),
+    dependency('nix-main'),
+    dependency('nix-cmd'),
+  ]
+endif
 deps_public_maybe_subproject = []
 subdir('nix-meson-build-support/subprojects')
 

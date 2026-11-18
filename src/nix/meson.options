@@ -23,6 +23,13 @@ option(
 )
 
 option(
+  'static-nix-libraries',
+  type : 'boolean',
+  value : false,
+  description : 'Link the Nix libraries into nix statically, so it starts faster. The libraries must be built with default_library=both. C++ plugins that link the shared Nix libraries break, since loading one brings in a second copy of the libraries and their global state. Plugins that use only the C API embedded by plugin-c-api keep working',
+)
+
+option(
   'bash-program',
   type : 'string',
   value : 'bash',

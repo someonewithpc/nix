@@ -4,3 +4,10 @@ option(
   value : false,
   description : 'Build plugin tests that expect the nix executable to export the public C API',
 )
+
+option(
+  'static-nix-libraries',
+  type : 'boolean',
+  value : false,
+  description : 'Skip the C++ plugin tests, which fail when nix links the Nix libraries statically',
+)
