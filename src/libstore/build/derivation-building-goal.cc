@@ -1159,11 +1159,16 @@ static std::unique_ptr<PostBuildHookState> runPostBuildHook(
         OS_STR("OUT_PATHS"), string_to_os_string(chomp(concatStringsSep(" ", store.printStorePathSet(outputPaths)))));
     hookEnvironment.emplace(OS_STR("NIX_CONFIG"), string_to_os_string(globalConfig.toKeyValue()));
 
+    /* Hand the environment to exec rather than rebuilding `environ` in
+       the child, which costs a quadratic unsetenv pass. */
+    Strings envStrs;
+    for (auto & [name, value] : hookEnvironment)
+        envStrs.push_back(name + "=" + value);
+
     ProcessOptions processOptions;
 
     state->pid = startProcess(
         [&] {
-            replaceEnv(hookEnvironment);
             if (dup2(state->out->writeSide.get(), STDOUT_FILENO) == -1)
                 throw SysError("dupping stdout");
             if (dup2(STDOUT_FILENO, STDERR_FILENO) == -1)
@@ -1178,7 +1183,7 @@ static std::unique_ptr<PostBuildHookState> runPostBuildHook(
                that needs an open mountns file descriptor (fdSavedMountNamespace). */
             unix::closeExtraFDs();
 
-            execvp(requireCString(hook), stringsToCharPtrs(args_).data());
+            execvpe(requireCString(hook), stringsToCharPtrs(args_).data(), stringsToCharPtrs(envStrs).data());
 
             throw SysError("executing %s", PathFmt(hook));
         },
