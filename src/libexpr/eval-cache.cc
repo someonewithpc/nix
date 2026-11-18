@@ -214,7 +214,7 @@ struct AttrDb
         });
     }
 
-    AttrId setInt(AttrKey key, int n)
+    AttrId setInt(AttrKey key, NixInt::Inner n)
     {
         return doSQLite([&]() {
             auto state(_state->lock());
