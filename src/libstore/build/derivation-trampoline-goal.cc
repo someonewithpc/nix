@@ -91,7 +91,8 @@ Goal::Co<DerivationTrampolineGoal::LoadResult> DerivationTrampolineGoal::loadDer
        exists.  If it doesn't, it may be built from another derivation,
        or merely substituted. We can make goal to get it and not worry
        about which method it takes to get the derivation. */
-    if (auto optDrvPath = [this]() -> std::optional<StorePath> {
+    Store * knownDrvStore = nullptr;
+    if (auto optDrvPath = [&]() -> std::optional<StorePath> {
             if (buildMode != bmNormal)
                 return std::nullopt;
 
@@ -101,8 +102,11 @@ Goal::Co<DerivationTrampolineGoal::LoadResult> DerivationTrampolineGoal::loadDer
             } catch (MissingRealisation &) {
                 return std::nullopt;
             }
-            auto cond = worker.evalStore.isValidPath(drvPath) || worker.store.isValidPath(drvPath);
-            return cond ? std::optional{drvPath} : std::nullopt;
+            if (worker.evalStore.isValidPath(drvPath))
+                knownDrvStore = &worker.evalStore;
+            else if (worker.store.isValidPath(drvPath))
+                knownDrvStore = &worker.store;
+            return knownDrvStore ? std::optional{drvPath} : std::nullopt;
         }()) {
         trace(
             fmt("already have drv '%s' for '%s', can go straight to building",
@@ -137,6 +141,8 @@ Goal::Co<DerivationTrampolineGoal::LoadResult> DerivationTrampolineGoal::loadDer
          - Dynamic derivations are built, and so are found in the main store.
      */
     auto drv = [&] {
+        if (knownDrvStore)
+            return knownDrvStore->readDerivation(drvPath);
         for (auto * drvStore : {&worker.evalStore, &worker.store})
             if (drvStore->isValidPath(drvPath))
                 return drvStore->readDerivation(drvPath);
