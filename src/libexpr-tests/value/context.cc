@@ -127,6 +127,11 @@ RC_GTEST_PROP(NixStringContextElemTest, prop_round_rip, (const NixStringContextE
     RC_ASSERT(o == NixStringContextElem::parse(o.to_string(), xpSettings));
 }
 
+RC_GTEST_PROP(NixStringContextElemTest, prop_parse_valid, (const NixStringContextElem & o))
+{
+    RC_ASSERT(o == NixStringContextElem::parseValid(o.to_string()));
+}
+
 static int sign(std::strong_ordering o)
 {
     return o < 0 ? -1 : o > 0 ? 1 : 0;

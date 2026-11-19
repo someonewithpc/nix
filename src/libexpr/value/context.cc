@@ -63,6 +63,28 @@ NixStringContextElem NixStringContextElem::parse(std::string_view s0, const Expe
     }
 }
 
+NixStringContextElem NixStringContextElem::parseValid(std::string_view s)
+{
+    auto parsePath = [](this auto & parsePath, std::string_view s) -> SingleDerivedPath {
+        auto index = s.find('!');
+        if (index == std::string_view::npos)
+            return SingleDerivedPath::Opaque{.path = StorePath::fromValidBaseName(s)};
+        return SingleDerivedPath::Built{
+            .drvPath = make_ref<SingleDerivedPath>(parsePath(s.substr(index + 1))),
+            .output = std::string{s.substr(0, index)},
+        };
+    };
+
+    switch (s[0]) {
+    case '!':
+        return std::visit([&](auto x) -> NixStringContextElem { return std::move(x); }, parsePath(s.substr(1)).raw());
+    case '=':
+        return NixStringContextElem::DrvDeep{.drvPath = StorePath::fromValidBaseName(s.substr(1))};
+    default:
+        return NixStringContextElem::Opaque{.path = StorePath::fromValidBaseName(s)};
+    }
+}
+
 std::string NixStringContextElem::to_string() const
 {
     std::string res;
@@ -165,7 +187,7 @@ void NixStringContext::materialize() const
     std::ranges::sort(encoded);
     auto last = std::unique(encoded.begin(), encoded.end());
     for (auto i = encoded.begin(); i != last; ++i)
-        elems.insert(NixStringContextElem::parse((*i)->view()));
+        elems.insert(NixStringContextElem::parseValid((*i)->view()));
     encoded.clear();
     encoded.shrink_to_fit();
 }

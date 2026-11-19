@@ -33,6 +33,14 @@ class StorePath
 {
     std::string baseName;
 
+    struct Valid
+    {};
+
+    StorePath(Valid, std::string_view baseName)
+        : baseName(baseName)
+    {
+    }
+
 public:
 
     /**
@@ -59,6 +67,14 @@ public:
 
     /** @throws BadStorePath */
     StorePath(const Hash & hash, std::string_view name);
+
+    /**
+     * Skips the checks, for a base name printed from a `StorePath`
+     */
+    static StorePath fromValidBaseName(std::string_view baseName)
+    {
+        return StorePath(Valid{}, baseName);
+    }
 
     std::string_view to_string() const noexcept
     {

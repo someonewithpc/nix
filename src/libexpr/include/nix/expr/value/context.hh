@@ -90,6 +90,12 @@ struct NixStringContextElem
     static NixStringContextElem
     parse(std::string_view s, const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
 
+    /**
+     * Like `parse`, for an encoding printed by `to_string()`, which
+     * needs no checks
+     */
+    static NixStringContextElem parseValid(std::string_view s);
+
     std::string to_string() const;
 
     /**
