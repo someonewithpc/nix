@@ -306,6 +306,27 @@ public:
           See [`eval-profiler`](#conf-eval-profiler).
         )"};
 
+    static constexpr uint64_t defaultGCInitialHeapSize = 1024 * 1024 * 1024;
+
+    Setting<uint64_t> gcInitialHeapSize{
+        this,
+        defaultGCInitialHeapSize,
+        "gc-initial-heap-size",
+        R"(
+          The size in bytes of the heap the evaluator's garbage collector
+          starts with. It is one heap for the whole process, not a figure
+          per thread, and it is not a limit: the heap grows past it as
+          needed. The collector does not run until this heap is full, so a
+          larger value means fewer collections and more resident memory.
+          Nix uses at most a quarter of the physical memory or of the memory
+          limit of its cgroup, whichever is lower.
+
+          The heap is set up before command line options are read, so only
+          the configuration files and `NIX_CONFIG` can change this. The
+          `GC_INITIAL_HEAP_SIZE` environment variable takes precedence over
+          it and over the quarter-of-memory bound.
+        )"};
+
     Setting<bool> useEvalCache{
         this,
         true,

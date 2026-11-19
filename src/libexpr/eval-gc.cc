@@ -1,6 +1,7 @@
 #include "nix/util/environment-variables.hh"
 #include "nix/expr/eval-settings.hh"
 #include "nix/util/config-global.hh"
+#include "nix/util/util.hh"
 #include "nix/expr/eval-gc.hh"
 #include "nix/expr/value.hh"
 
@@ -80,6 +81,23 @@ static std::optional<size_t> cgroupMemoryLimit()
 }
 #  endif
 
+/**
+ * The `gc-initial-heap-size` setting. The `EvalSettings` that holds it
+ * belongs to the program, so it is looked up by name among the settings
+ * the configuration files changed
+ */
+static size_t initialHeapSize()
+{
+    std::map<std::string, AbstractConfig::SettingInfo> overridden;
+    globalConfig.getSettings(overridden, true);
+    if (auto i = overridden.find("gc-initial-heap-size"); i != overridden.end())
+        try {
+            return string2IntWithUnitPrefix<uint64_t>(i->second.value);
+        } catch (UsageError &) {
+        }
+    return EvalSettings::defaultGCInitialHeapSize;
+}
+
 static inline void initGCReal()
 {
     /* Initialise the Boehm garbage collector. */
@@ -136,19 +154,17 @@ static inline void initGCReal()
         }
     });
 
-    /* Set the initial heap size to something fairly big (25% of
-       physical RAM or of the cgroup's memory limit, up to a maximum of
-       384 MiB) so that in most cases we don't need to garbage collect at
-       all.  (Collection has a fairly significant overhead.)  The heap
-       size can be overridden through libgc's GC_INITIAL_HEAP_SIZE
-       environment variable.  We should probably also provide a nix.conf
-       setting for this.  Note that GC_expand_hp() causes a lot of
+    /* Start with a heap of `gc-initial-heap-size`, at most 25% of
+       physical RAM or of the cgroup's memory limit, so that most evals
+       don't need to garbage collect at all.  (Collection has a fairly
+       significant overhead.)  libgc's GC_INITIAL_HEAP_SIZE environment
+       variable overrides both.  Note that GC_expand_hp() causes a lot of
        virtual, but not physical (resident) memory to be allocated.  This
        might be a problem on systems that don't overcommit. */
     if (!getEnv("GC_INITIAL_HEAP_SIZE")) {
         size_t size = 32 * 1024 * 1024;
 #  if HAVE_SYSCONF && defined(_SC_PAGESIZE) && defined(_SC_PHYS_PAGES)
-        size_t maxSize = 384 * 1024 * 1024;
+        size_t wanted = initialHeapSize();
         long pageSize = sysconf(_SC_PAGESIZE);
         long pages = sysconf(_SC_PHYS_PAGES);
         if (pageSize != -1) {
@@ -159,8 +175,8 @@ static inline void initGCReal()
 #    endif
             size = memory / 4;
         }
-        if (size > maxSize)
-            size = maxSize;
+        if (size > wanted)
+            size = wanted;
 #  endif
         debug("setting initial heap size to %1% bytes", size);
         GC_expand_hp(size);
