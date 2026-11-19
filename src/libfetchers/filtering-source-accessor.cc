@@ -1,9 +1,11 @@
 #include "nix/fetchers/filtering-source-accessor.hh"
+#include "nix/util/strings.hh"
 #include "nix/util/sync.hh"
 #include "nix/util/util.hh"
 
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include <boost/unordered/concurrent_flat_set.hpp>
+#include <boost/unordered/unordered_flat_map.hpp>
 
 namespace nix {
 
@@ -74,30 +76,70 @@ struct AllowListSourceAccessorImpl : AllowListSourceAccessor
 {
 private:
     void anchor() override {};
-public:
-    SharedSync<std::set<CanonPath>> allowedPrefixes;
+
+    /**
+     * Every allowed prefix (true) and every ancestor of one (false). It
+     * holds the parent of each of its paths, so a walk down from the root
+     * can stop at the first path that is missing.
+     */
+    using Prefixes = boost::unordered_flat_map<std::string, bool, StringViewHash, std::equal_to<>>;
+
+    static void insertPrefix(Prefixes & prefixes, const CanonPath & prefix)
+    {
+        auto & s = prefix.abs();
+        prefixes.insert_or_assign(s, true);
+        for (auto i = s.size(); i > 1;) {
+            i = s.rfind('/', i - 1);
+            if (!prefixes.try_emplace(s.substr(0, i ? i : 1), false).second)
+                break;
+        }
+    }
+
+    SharedSync<Prefixes> allowedPrefixes;
     boost::concurrent_flat_set<CanonPath> allowedPaths;
 
+public:
     AllowListSourceAccessorImpl(
         ref<SourceAccessor> next,
         const std::set<CanonPath> & allowedPrefixes,
         const std::unordered_set<CanonPath> & allowedPaths,
         MakeNotAllowedError && makeNotAllowedError)
         : AllowListSourceAccessor(SourcePath(next), std::move(makeNotAllowedError))
-        , allowedPrefixes(allowedPrefixes.begin(), allowedPrefixes.end())
         , allowedPaths(allowedPaths.begin(), allowedPaths.end())
     {
+        auto prefixes(this->allowedPrefixes.lock());
+        for (auto & prefix : allowedPrefixes)
+            insertPrefix(*prefixes, prefix);
     }
 
+    /**
+     * Same verdict as `path.isAllowed(prefixes)`: `path` is an allowed
+     * prefix, lies under one or is an ancestor of one.
+     */
     bool isAllowed(const CanonPath & path) override
     {
-        /* Read lock is held for the duration of the full expression if the || doesn't short-circuit. */
-        return allowedPaths.contains(path) || path.isAllowed(*allowedPrefixes.readLock());
+        if (allowedPaths.contains(path))
+            return true;
+
+        auto prefixes(allowedPrefixes.readLock());
+        std::string_view s = path.abs();
+        if (prefixes->contains(s))
+            return true;
+        if (s.size() == 1)
+            return false;
+        for (size_t end = 1; end != s.npos; end = s.find('/', end + 1)) {
+            auto i = prefixes->find(s.substr(0, end));
+            if (i == prefixes->end())
+                return false;
+            if (i->second)
+                return true;
+        }
+        return false;
     }
 
     void allowPrefix(CanonPath prefix) override
     {
-        allowedPrefixes.lock()->insert(std::move(prefix));
+        insertPrefix(*allowedPrefixes.lock(), prefix);
     }
 };
 
