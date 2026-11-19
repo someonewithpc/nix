@@ -2231,11 +2231,18 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
         return true;
     }();
 
+    auto withRange = [](const Bindings & b, auto && f) {
+        if (b.isLayered())
+            f(b);
+        else
+            f(b.flatAttrs());
+    };
+
     if (shouldLayer) {
         auto attrs = state.buildBindings(bindings2.size());
         attrs.layerOnTopOf(bindings1);
 
-        std::ranges::copy(bindings2, std::back_inserter(attrs));
+        withRange(bindings2, [&](const auto & r2) { std::ranges::copy(r2, std::back_inserter(attrs)); });
         v.mkAttrs(attrs.alreadySorted());
 
         state.nrOpUpdateValuesCopied += bindings2.size();
@@ -2246,32 +2253,32 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
 
     /* Merge the sets, preferring values from the second set.  Make
        sure to keep the resulting vector in sorted order. */
-    auto i = bindings1.begin();
-    auto j = bindings2.begin();
+    withRange(bindings1, [&](const auto & r1) {
+        withRange(bindings2, [&](const auto & r2) {
+            auto i = r1.begin(), end1 = r1.end();
+            auto j = r2.begin(), end2 = r2.end();
 
-    while (i != bindings1.end() && j != bindings2.end()) {
-        if (i->name == j->name) {
-            attrs.insert(*j);
-            ++i;
-            ++j;
-        } else if (i->name < j->name) {
-            attrs.insert(*i);
-            ++i;
-        } else {
-            attrs.insert(*j);
-            ++j;
-        }
-    }
+            while (i != end1 && j != end2) {
+                if (i->name == j->name) {
+                    attrs.insert(*j);
+                    ++i;
+                    ++j;
+                } else if (i->name < j->name) {
+                    attrs.insert(*i);
+                    ++i;
+                } else {
+                    attrs.insert(*j);
+                    ++j;
+                }
+            }
 
-    while (i != bindings1.end()) {
-        attrs.insert(*i);
-        ++i;
-    }
+            for (; i != end1; ++i)
+                attrs.insert(*i);
 
-    while (j != bindings2.end()) {
-        attrs.insert(*j);
-        ++j;
-    }
+            for (; j != end2; ++j)
+                attrs.insert(*j);
+        });
+    });
 
     v.mkAttrs(attrs.alreadySorted());
 

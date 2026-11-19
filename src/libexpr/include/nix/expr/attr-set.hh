@@ -10,6 +10,7 @@
 #include <functional>
 #include <ranges>
 #include <optional>
+#include <span>
 
 namespace nix {
 
@@ -307,6 +308,15 @@ public:
     const_iterator end() const
     {
         return const_iterator();
+    }
+
+    /**
+     * The attributes of a set with one layer, in order
+     */
+    std::span<const Attr> flatAttrs() const noexcept
+    {
+        assert(!baseLayer);
+        return {attrs, numAttrs};
     }
 
     Attr & operator[](size_type pos)
