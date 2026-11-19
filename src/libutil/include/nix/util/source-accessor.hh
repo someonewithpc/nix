@@ -152,6 +152,17 @@ public:
     virtual DirEntries readDirectory(const CanonPath & path) = 0;
 
     /**
+     * `readDirectory`, or nothing when the directory is the one at
+     * `physicalPath` in the root file system, which the caller has read
+     * already. It throws as `readDirectory` would
+     */
+    virtual std::optional<DirEntries>
+    readDirectoryUnlessAt(const CanonPath & path, const std::filesystem::path & physicalPath)
+    {
+        return readDirectory(path);
+    }
+
+    /**
      * Variation of readDirectory that receives a SourceAccessor possibly scoped to @p dirPath.
      * Primary meant for recursive traversal functions that would benefit from *at-style syscalls
      * relative to a particular directory.

@@ -44,14 +44,31 @@ public:
     {
         DirEntries result;
         bool exists = false;
+        /* Where the first listing came from. Impure evaluation puts the
+           store over the root file system, and both list the same store
+           directory */
+        std::optional<std::filesystem::path> readAt;
         for (auto & accessor : accessors) {
             auto st = accessor->maybeLstat(path);
             if (!st)
                 continue;
+            std::optional<DirEntries> entries;
+            if (!exists) {
+                entries = accessor->readDirectory(path);
+                readAt = accessor->getPhysicalPath(path);
+            } else if (readAt)
+                entries = accessor->readDirectoryUnlessAt(path, *readAt);
+            else
+                entries = accessor->readDirectory(path);
+            if (!entries)
+                continue;
+            if (!exists)
+                result = std::move(*entries);
+            else
+                for (auto & entry : *entries)
+                    // Don't override entries from previous accessors.
+                    result.insert(std::move(entry));
             exists = true;
-            for (auto & entry : accessor->readDirectory(path))
-                // Don't override entries from previous accessors.
-                result.insert(entry);
         }
         if (!exists)
             throw FileNotFound("path '%s' does not exist", showPath(path));

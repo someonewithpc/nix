@@ -112,6 +112,15 @@ public:
         return accessor->readDirectory(path);
     }
 
+    std::optional<DirEntries>
+    readDirectoryUnlessAt(const CanonPath & path, const std::filesystem::path & physicalPath) override
+    {
+        requireStoreObject(path);
+        if (accessor->getPhysicalPath(path) == physicalPath)
+            return std::nullopt;
+        return accessor->readDirectory(path);
+    }
+
     void readDirectory(
         const CanonPath & dirPath,
         std::function<void(SourceAccessor & subdirAccessor, const CanonPath & subdirRelPath)> callback) override

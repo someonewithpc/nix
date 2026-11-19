@@ -57,6 +57,12 @@ public:
         return next->readDirectory(path);
     }
 
+    std::optional<DirEntries>
+    readDirectoryUnlessAt(const CanonPath & path, const std::filesystem::path & physicalPath) override
+    {
+        return next->readDirectoryUnlessAt(path, physicalPath);
+    }
+
     void readDirectory(
         const CanonPath & dirPath,
         std::function<void(SourceAccessor & subdirAccessor, const CanonPath & subdirRelPath)> callback) override

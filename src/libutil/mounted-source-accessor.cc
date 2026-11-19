@@ -51,6 +51,13 @@ public:
         return accessor->readDirectory(subpath);
     }
 
+    std::optional<DirEntries>
+    readDirectoryUnlessAt(const CanonPath & path, const std::filesystem::path & physicalPath) override
+    {
+        auto [accessor, subpath] = resolve(path);
+        return accessor->readDirectoryUnlessAt(subpath, physicalPath);
+    }
+
     std::string readLink(const CanonPath & path) override
     {
         auto [accessor, subpath] = resolve(path);
