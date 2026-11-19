@@ -359,6 +359,7 @@ public:
     };
 
     EvalMemory();
+    ~EvalMemory();
 
     EvalMemory(const EvalMemory &) = delete;
     EvalMemory(EvalMemory &&) = delete;
@@ -402,6 +403,13 @@ public:
 
 private:
     Statistics stats;
+
+    /**
+     * Heads of the lists from `GC_malloc_many`: Values at 0 and Envs of
+     * one slot at 1. They live in an uncollectable block, which the
+     * collector scans, so the objects on the lists stay reserved
+     */
+    void ** freeLists = nullptr;
 };
 
 class EvalState : public std::enable_shared_from_this<EvalState>

@@ -242,6 +242,18 @@ static constexpr size_t BASE_ENV_SIZE = 128;
 EvalMemory::EvalMemory()
 {
     assertGCInitialized();
+#if NIX_USE_BOEHMGC
+    freeLists = static_cast<void **>(GC_MALLOC_UNCOLLECTABLE(2 * sizeof(void *)));
+    if (!freeLists)
+        throw std::bad_alloc();
+#endif
+}
+
+EvalMemory::~EvalMemory()
+{
+#if NIX_USE_BOEHMGC
+    GC_FREE(freeLists);
+#endif
 }
 
 /* Reads and parses the files that evaluated code names by a path literal
