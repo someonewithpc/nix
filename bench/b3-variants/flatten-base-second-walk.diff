@@ -1,0 +1,82 @@
+diff --git a/src/libexpr/attr-set.cc b/src/libexpr/attr-set.cc
+index 9c4c24fc3..373d8a336 100644
+--- a/src/libexpr/attr-set.cc
++++ b/src/libexpr/attr-set.cc
+@@ -34,6 +34,29 @@ Value & BindingsBuilder::alloc(std::string_view name, PosIdx pos)
+     return alloc(symbols.get().create(name), pos);
+ }
+ 
++void Bindings::flattenBase() const
++{
++    auto & base = *baseLayer;
++    size_t capacity = 0;
++    for (const Bindings * layer = &base; layer; layer = layer->baseLayer)
++        capacity += layer->numAttrs;
++
++    size_t bytes = sizeof(Bindings) + capacity * sizeof(Attr);
++#if NIX_USE_BOEHMGC
++    void * p = GC_MALLOC(bytes);
++#else
++    void * p = calloc(bytes, 1);
++#endif
++    if (!p)
++        throw std::bad_alloc();
++    auto flat = new (p) Bindings();
++    flat->pos = base.pos;
++    for (auto & attr : base)
++        flat->attrs[flat->numAttrs++] = attr;
++    flat->numAttrsInChain = flat->numAttrs;
++    baseLayer = flat;
++}
++
+ void Bindings::sort()
+ {
+     std::sort(attrs, attrs + numAttrs);
+diff --git a/src/libexpr/include/nix/expr/attr-set.hh b/src/libexpr/include/nix/expr/attr-set.hh
+index 4985f28d1..108b741a3 100644
+--- a/src/libexpr/include/nix/expr/attr-set.hh
++++ b/src/libexpr/include/nix/expr/attr-set.hh
+@@ -93,12 +93,20 @@ private:
+     /**
+      * Length of the layers list.
+      */
+-    uint32_t numLayers = 1;
++    uint16_t numLayers = 1;
++
++    /**
++     * Whether a layered set was walked before. The second walk flattens the
++     * layers below the topmost one
++     */
++    mutable bool walked = false;
+ 
+     /**
+      * Bindings that this attrset is "layered" on top of.
+      */
+-    const Bindings * baseLayer = nullptr;
++    mutable const Bindings * baseLayer = nullptr;
++
++    void flattenBase() const;
+ 
+     /**
+      * Flexible array member of attributes.
+@@ -186,7 +194,7 @@ public:
+             current = best;
+         }
+ 
+-        explicit iterator(const Bindings & attrs) noexcept
++        explicit iterator(const Bindings & attrs)
+         {
+             if (!attrs.baseLayer) [[likely]] {
+                 if (attrs.numAttrs != 0) {
+@@ -196,6 +204,11 @@ public:
+                 return;
+             }
+ 
++            if (!attrs.walked)
++                attrs.walked = true;
++            else if (attrs.baseLayer->baseLayer)
++                attrs.flattenBase();
++
+             for (const Bindings * layer = &attrs; layer; layer = layer->baseLayer)
+                 if (layer->numAttrs != 0)
+                     cursors[numCursors++] = {layer->attrs, layer->attrs + layer->numAttrs};

@@ -660,6 +660,44 @@ Checks:
 - lang, restricted, pure-eval, impure-eval, the expr, flake, fetchers and
   util unit tests, and the flakes suite: 43 passed, 0 failed, lang-gc
   skipped (it always skips)
+### 2026-11-19 on beryllium: attribute set iteration (B3)
+
+| Build | hello | minimal NixOS | real system | real system RSS |
+|---|---|---|---|---|
+| `fast-eval` | 0.927 G | 17.55 G | 60.51 G | 1532 MB |
+| B3 (`fe-b3-attriter`) | 0.929 G | 17.55 G | 58.84 G | 1548 MB |
+| B3, flatten on the first walk | 0.929 G | 17.80 G | 64.90 G | 1700 MB |
+| B3, flatten the base on the second walk | | 17.65 G | 63.87 G | 1540 MB |
+
+Medians of 3 interleaved runs of `instructions:u`, `nix eval --read-only
+--no-eval-cache` on hello.drvPath, `bench/scripts/nixos.nix` and the
+system at `git+file:///etc/nixos?rev=19709e05`. RSS is the peak from
+`getrusage`, which moves by 20 MB between runs. Script:
+`bench/b3-variants/perf.py`. The drv paths equal base's
+
+- A set with one layer walks as a pointer range. A layered set merges up
+  to eight cursors with a linear scan instead of a heap
+- `//` merges two one-layer sets from spans of `Attr`, and copies a
+  one-layer right side into a new layer the same way
+- The real system saves 2.8%. hello and the minimal NixOS barely use
+  layered sets or big `//` merges and don't move
+- Flattening a layered set when it is walked costs more than it saves.
+  Layered sets are mostly walked once, and the copy of a large base such
+  as `pkgs` is an extra walk plus a GC allocation. Flattening on the first
+  walk needs a cache pointer in every `Bindings`, which grows its header from
+  24 to 32 bytes, and adds
+  10% instructions and 10% peak RSS. Flattening only the layers below the
+  top on the second walk fits in the existing header (a 16-bit
+  `numLayers` and a flag) and still adds 8.6%. Neither is kept, so
+  `Bindings` keeps its layout and C1 starts from the same header. Both
+  patches are in `bench/b3-variants/`
+
+Tests: libexpr unit tests 398 passed, 0 failed, including
+`BindingsTest` (5000 random stacks of 1 to 8 layers against a `std::map`
+model). `tests/functional/lang` passed, lang-gc skipped. T0 `-s all`
+against base: 0 of 1507 cases differ. Its two system cases were flaky in
+base on the first run, which unpacked flake inputs into the Git cache, and
+matched on a rerun of `-s system --no-cache`
 
 ## Left to do
 

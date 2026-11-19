@@ -1,0 +1,207 @@
+diff --git a/src/libexpr/attr-set.cc b/src/libexpr/attr-set.cc
+index 9c4c24fc3..e7cd97073 100644
+--- a/src/libexpr/attr-set.cc
++++ b/src/libexpr/attr-set.cc
+@@ -34,6 +34,62 @@ Value & BindingsBuilder::alloc(std::string_view name, PosIdx pos)
+     return alloc(symbols.get().create(name), pos);
+ }
+ 
++/* Merges the layers, topmost first: at each step take the smallest name among
++   the layers, from the topmost layer that has it, then skip that name in every
++   layer. That also skips names repeated within one layer, as the heap merge
++   did */
++const Bindings & Bindings::flatten() const
++{
++    struct Cursor
++    {
++        const Attr * current;
++        const Attr * end;
++    };
++
++    Cursor cursors[maxLayers];
++    uint32_t numCursors = 0;
++    size_t capacity = 0;
++    for (const Bindings * layer = this; layer; layer = layer->baseLayer)
++        if (layer->numAttrs != 0) {
++            cursors[numCursors++] = {layer->attrs, layer->attrs + layer->numAttrs};
++            capacity += layer->numAttrs;
++        }
++
++    size_t bytes = sizeof(Bindings) + capacity * sizeof(Attr);
++#if NIX_USE_BOEHMGC
++    void * p = GC_MALLOC(bytes);
++#else
++    void * p = calloc(bytes, 1);
++#endif
++    if (!p)
++        throw std::bad_alloc();
++    auto res = new (p) Bindings();
++    res->pos = pos;
++
++    while (numCursors != 0) {
++        const Attr * best = cursors[0].current;
++        for (uint32_t i = 1; i < numCursors; ++i)
++            if (cursors[i].current->name < best->name)
++                best = cursors[i].current;
++        res->attrs[res->numAttrs++] = *best;
++
++        Symbol last = best->name;
++        uint32_t kept = 0;
++        for (uint32_t i = 0; i < numCursors; ++i) {
++            Cursor c = cursors[i];
++            while (c.current != c.end && c.current->name <= last)
++                ++c.current;
++            if (c.current != c.end)
++                cursors[kept++] = c;
++        }
++        numCursors = kept;
++    }
++    res->numAttrsInChain = res->numAttrs;
++
++    flattened = res;
++    return *res;
++}
++
+ void Bindings::sort()
+ {
+     std::sort(attrs, attrs + numAttrs);
+diff --git a/src/libexpr/include/nix/expr/attr-set.hh b/src/libexpr/include/nix/expr/attr-set.hh
+index 4985f28d1..24b919d98 100644
+--- a/src/libexpr/include/nix/expr/attr-set.hh
++++ b/src/libexpr/include/nix/expr/attr-set.hh
+@@ -100,6 +100,23 @@ private:
+      */
+     const Bindings * baseLayer = nullptr;
+ 
++    /**
++     * For a layered set, its layers merged into one, made the first time the
++     * set is walked
++     */
++    mutable const Bindings * flattened = nullptr;
++
++    const Bindings & flatten() const;
++
++    const Bindings & flat() const
++    {
++        if (!baseLayer) [[likely]]
++            return *this;
++        if (!flattened)
++            return flatten();
++        return *flattened;
++    }
++
+     /**
+      * Flexible array member of attributes.
+      */
+@@ -132,10 +149,7 @@ public:
+     }
+ 
+     /**
+-     * Walks a set with one layer as a pointer range. For a layered set it
+-     * merges the layers on the fly: at each step it yields the smallest name
+-     * among the layers, from the topmost layer that has it, then skips that
+-     * name in every layer
++     * Walks the set as a pointer range. A layered set is flattened first
+      */
+     class iterator
+     {
+@@ -149,58 +163,16 @@ public:
+         friend class Bindings;
+ 
+     private:
+-        struct Cursor
+-        {
+-            pointer current;
+-            pointer end;
+-        };
+-
+         pointer current = nullptr;
+-
+-        /**
+-         * End of the range for a set with one layer
+-         */
+         pointer rangeEnd = nullptr;
+ 
+-        /**
+-         * Number of layers left to merge, topmost first. Zero for a set with
+-         * one layer
+-         */
+-        uint32_t numCursors = 0;
+-
+-        union
+-        {
+-            Cursor cursors[maxLayers];
+-        };
+-
+-        void pickSmallest() noexcept
+-        {
+-            if (numCursors == 0) {
+-                current = nullptr;
+-                return;
+-            }
+-            pointer best = cursors[0].current;
+-            for (uint32_t i = 1; i < numCursors; ++i)
+-                if (cursors[i].current->name < best->name)
+-                    best = cursors[i].current;
+-            current = best;
+-        }
+-
+-        explicit iterator(const Bindings & attrs) noexcept
++        explicit iterator(const Bindings & attrs)
+         {
+-            if (!attrs.baseLayer) [[likely]] {
+-                if (attrs.numAttrs != 0) {
+-                    current = attrs.attrs;
+-                    rangeEnd = attrs.attrs + attrs.numAttrs;
+-                }
+-                return;
++            auto & f = attrs.flat();
++            if (f.numAttrs != 0) {
++                current = f.attrs;
++                rangeEnd = f.attrs + f.numAttrs;
+             }
+-
+-            for (const Bindings * layer = &attrs; layer; layer = layer->baseLayer)
+-                if (layer->numAttrs != 0)
+-                    cursors[numCursors++] = {layer->attrs, layer->attrs + layer->numAttrs};
+-
+-            pickSmallest();
+         }
+ 
+     public:
+@@ -218,23 +190,8 @@ public:
+ 
+         iterator & operator++() noexcept
+         {
+-            if (numCursors == 0) [[likely]] {
+-                if (++current == rangeEnd)
+-                    current = nullptr;
+-                return *this;
+-            }
+-
+-            Symbol last = current->name;
+-            uint32_t kept = 0;
+-            for (uint32_t i = 0; i < numCursors; ++i) {
+-                Cursor c = cursors[i];
+-                while (c.current != c.end && c.current->name <= last)
+-                    ++c.current;
+-                if (c.current != c.end)
+-                    cursors[kept++] = c;
+-            }
+-            numCursors = kept;
+-            pickSmallest();
++            if (++current == rangeEnd)
++                current = nullptr;
+             return *this;
+         }
+ 
+@@ -273,6 +230,9 @@ public:
+             return nullptr;
+         };
+ 
++        if (flattened)
++            return getInChunk(*flattened);
++
+         const Bindings * currentChunk = this;
+         while (currentChunk) {
+             const Attr * maybeAttr = getInChunk(*currentChunk);
