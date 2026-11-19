@@ -699,6 +699,60 @@ against base: 0 of 1507 cases differ. Its two system cases were flaky in
 base on the first run, which unpacked flake inputs into the Git cache, and
 matched on a rerun of `-s system --no-cache`
 
+### 2026-11-19 on beryllium: string contexts (B4)
+
+`NixStringContext` is a class instead of a `std::set`. Elements copied
+from a string value stay as that value's `StringData` pointers, in a
+GC-scanned vector, and are parsed only when a caller reads the builder
+element by element. Making a string sorts and dedupes the pointers with
+`compareEncodedContextElems`, which orders encoded strings the way the
+parsed elements compare, and reuses them, so no element is printed or
+allocated again. A builder holding one value's context and nothing else
+gives that context array back as is. Elements read back from values are
+parsed with `parseValid`, which skips the store path checks
+
+The callers keep their `NixStringContext &` signatures, so this is not the
+L refactor the plan feared. The gain is smaller than its 3%: with B1 and
+B2 in, context work was 3.0% of the system eval's main-thread cycles in
+the `fast-eval` profile (copyContext 1.7%, the rest building and freeing
+sets), and most of what is left is `derivationStrict`, which needs typed
+elements for `drv.inputs`. Instructions (`perf stat -e instructions:u`, 3
+interleaved rounds, median, dev builds of `fast-eval` with and without
+the change):
+
+| Workload | fast-eval | B4 | Change |
+|---|---|---|---|
+| real system toplevel, `--no-eval-cache --read-only`, `/etc/nixos` at T0's pinned rev | 56.16 G | 55.70 G | -0.8% |
+| `hello.drvPath`, `--impure` | 925.2 M | 910.9 M | -1.5% |
+
+The first commit alone gave -0.5% and -1.2%. Sorting the elements by
+content before parsing them in `derivationStrict` made it slower (56.16 G),
+since pointer dedupe already catches most repeats, so it was dropped.
+In the B4 profile `derivationStrict` parsing its context is 1.2% of the
+main thread, 40% of it store path checks, which `parseValid` removes
+
+Checks:
+
+- T0 `eval-diff.sh -s all` against the base build: 0 of 1507 cases differ
+- New `nix-expr-tests` cases: `compareEncodedContextElems` against
+  `NixStringContextElem::operator<=>` on every pair of 148 elements (two
+  levels of nested outputs, names that are prefixes of each other, empty
+  output names) and on random pairs, and `parseValid` against `parse` on
+  random elements
+- A probe of `getContext`, `appendContext`, `hasContext`,
+  `unsafeDiscardOutputDependency`, `addDrvOutputDependencies`,
+  `substring`, `match`, `split`, `replaceStrings`, `concatStringsSep`,
+  `toJSON` and derivations with structured attrs, plus seven context
+  errors, written into chroot stores: output identical to the base build
+- nix-expr-tests, lang, eval, readfile-context, structured-attrs,
+  derivation-advanced-attributes, derivation-json,
+  import-from-derivation, impure-derivations, eval-store, pure-eval,
+  impure-eval, eval-cache, and the dynamic derivation tests eval-outputOf,
+  dep-built-drv, build-built-drv, text-hashed-output, recursive-mod-json:
+  22 passed, lang-gc skipped (it always skips). nix-store-tests passes
+  with `HTTPS_PROXY` unset and fails its 3 HTTPS cases with it set, as
+  A6 found
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
