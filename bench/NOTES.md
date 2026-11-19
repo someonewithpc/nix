@@ -624,6 +624,43 @@ Tests:
   static and the shared build. Configuring with `s3-aws-auth` disabled
   builds no module
 
+### 2026-11-19 on beryllium: cheap path checks (B2)
+
+`AllowListSourceAccessorImpl` keeps its allowed prefixes, with their
+ancestors, in one flat hash map instead of a `std::set<CanonPath>`, and
+`isAllowed` walks the path's ancestors down from the root until one is
+missing or is a prefix. Instructions (`perf stat -e instructions:u`, 3
+interleaved rounds, median, dev builds of `fast-eval` with and without
+the change, each run with its own `LD_LIBRARY_PATH`):
+
+| Workload | fast-eval | B2 | Change |
+|---|---|---|---|
+| real system toplevel, pure flake eval, `--no-eval-cache --read-only`, `/etc/nixos` at T0's pinned rev | 62.02 G | 57.66 G | -7.0% |
+| `hello.drvPath`, `--impure` | 987.9 M | 987.7 M | 0.0% |
+
+Only pure and restricted evals have an allow list, so `hello` and the
+minimal NixOS (both `--impure`) do not change. Their path cost is lstat
+and `readDir`, which B7 covers. In the base profile of the system,
+`AllowListSourceAccessorImpl::isAllowed` was 2.6% of the main thread's
+cycles. The rest of the plan's B2 list does not pay on these workloads:
+`fetchToStore` on a `srcToStore` hit is about 0.4% (most of its 3% is
+hashing source trees in read-only mode), and `CanonPath` comparisons
+outside `isAllowed` are under 0.2%
+
+Checks:
+
+- T0 `eval-diff.sh -s all` against the base build: 0 of 1507 cases differ
+- New `nix-fetchers-tests` cases: the map's verdict equals
+  `CanonPath::isAllowed` on 20,000 random paths with prefixes added
+  mid-run, plus empty and root allow lists, exact allowed paths and the
+  denial error for `readFile`, `lstat`, `pathExists` and `maybeLstat`
+- `restricted.sh` gained a store path that is denied, then allowed by a
+  `"${./dir}"` copy mid-eval and read below, with a sibling still
+  forbidden. The same expressions give the same output on the base build
+- lang, restricted, pure-eval, impure-eval, the expr, flake, fetchers and
+  util unit tests, and the flakes suite: 43 passed, 0 failed, lang-gc
+  skipped (it always skips)
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
