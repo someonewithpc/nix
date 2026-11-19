@@ -804,6 +804,64 @@ Checks: T0 `eval-diff.sh -s all` against base, 0 of 1507 cases differ.
 libexpr unit tests 398 passed, 0 failed. `tests/functional/lang` passed,
 lang-gc skipped. hello and the minimal NixOS with `GC_INITIAL_HEAP_SIZE=2000000
 GC_FREE_SPACE_DIVISOR=50` (54 and 159 collections) give base's drv paths
+### 2026-11-19 on beryllium: symbols, readDir, GC heap (B5, B7, B9)
+
+Instructions from `perf stat -e instructions:u`, all threads, with
+`measure.sh` and `ab.sh` in `work/scratch/` of `fe-b579`, builds
+interleaved. The real system is `$SYS` with `--read-only
+--no-eval-cache`, at load 13 to 60
+
+| Step | hello | minimal NixOS | real system |
+|---|---|---|---|
+| `fast-eval` | 927.3 M | 17.55 G | 60.72 G |
+| B5, symbols through the thread's cache | 927.3 M | 17.43 G | 60.29 G |
+| B7, one listing of a store directory | 890.6 M | 17.35 G | 60.28 G |
+| B9, `gc-initial-heap-size` 512 MiB (default) | | 16.04 G | 63.03 G |
+| B9, `gc-initial-heap-size` 2 GiB | 892.1 M | 14.41 G | 50.76 G |
+
+- B5: `SymbolTable::create` goes through the parser's thread-local cache
+  and interns in the table on a miss, so ids keep their order. hello
+  gains nothing, since its readDir names are new to the table, and the
+  cache's insert path is now 3.4% of its samples
+- B7: impure evaluation reads through a union of the root file system
+  and the store, and a store directory was listed by both and merged.
+  The store accessor now skips the second listing when it is the same
+  physical directory, after its usual checks. On hello, readDir went
+  from 16.4% to 10.7% of samples and task clock from 176.6 to 162.3 ms
+  (`-r 10`, three rounds). Most of what is left is the one listing and
+  interning names the table has not seen. Reading with `getdents64`
+  would save part of `readdir`'s 0.8%, so it was left out
+- B9: the initial heap is the `gc-initial-heap-size` setting, 512 MiB
+  by default, at most a quarter of RAM or of the cgroup's `memory.max` or
+  `memory.high`. `GC_INITIAL_HEAP_SIZE` still wins. Medians of five
+  interleaved runs against the old 384 MiB heap:
+
+  | Workload | Heap | Instructions | User | Peak RSS |
+  |---|---|---|---|---|
+  | minimal NixOS | 384 MiB | 17.34 G | 2.24 s | 800 MB |
+  | minimal NixOS | 512 MiB | 16.04 G | 1.91 s | 933 MB |
+  | minimal NixOS | 2 GiB | 14.41 G | 1.58 s | 1004 MB |
+  | real system | 384 MiB | 60.39 G | 7.62 s | 1561 MB |
+  | real system | 512 MiB | 63.03 G | 8.25 s | 1487 MB |
+  | real system | 2 GiB | 50.76 G | 5.11 s | 2042 MB |
+
+  The real system is 4% worse at 512 MiB than at 384 MiB: it collects at
+  other points and ends with a smaller heap. Wall times are within noise
+  for all three (system 5.96 to 6.01 s, NixOS 1.86 to 1.91 s), since GC
+  marking runs on idle cores. An earlier sweep with the environment
+  variable: 1 GiB saves 11% on the system with no RSS change, 1.5 GiB and
+  up 16%. Under `systemd-run -p MemoryMax=1G` the minimal NixOS starts
+  at 256 MiB and collects 4 times, at 600M 5 times
+
+Tests: readDir cases in `work/scratch/rd/cases.sh` (symlinks to a file,
+a directory and nowhere, a FIFO, a socket, missing paths, a file,
+`/nix/store` itself, store paths through `/run/current-system`) print
+the same as base. T0 `eval-diff.sh -s all` against base: 0 of 1507
+cases differ, with the two system cases flaky in base (first-run Git
+cache messages); base, new and base again print the same system drv.
+Suites lang, toString-path, restricted and the expr, util and store unit
+tests: 6 passed, 0 failed, lang-gc skips itself. The store tests' HTTPS
+cases need the sandbox's `HTTPS_PROXY` unset
 
 ## Left to do
 
