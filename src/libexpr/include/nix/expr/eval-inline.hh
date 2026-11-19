@@ -75,10 +75,10 @@ Env & EvalMemory::allocEnv(size_t size)
     Env * env;
 
 #if NIX_USE_BOEHMGC
-    if (size == 1) {
-        void *& list = freeLists[1];
+    if (size - 1 < maxListedEnvSize) {
+        void *& list = freeLists[size];
         if (!list) {
-            list = GC_malloc_many(sizeof(Env) + sizeof(Value *));
+            list = GC_malloc_many(sizeof(Env) + size * sizeof(Value *));
             if (!list)
                 throw std::bad_alloc();
         }

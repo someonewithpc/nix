@@ -404,10 +404,13 @@ public:
 private:
     Statistics stats;
 
+    static constexpr size_t maxListedEnvSize = 8;
+
     /**
      * Heads of the lists from `GC_malloc_many`: Values at 0 and Envs of
-     * one slot at 1. They live in an uncollectable block, which the
-     * collector scans, so the objects on the lists stay reserved
+     * n slots at n, up to `maxListedEnvSize`. They live in an
+     * uncollectable block, which the collector scans, so the objects on
+     * the lists stay reserved
      */
     void ** freeLists = nullptr;
 };

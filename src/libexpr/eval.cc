@@ -243,7 +243,7 @@ EvalMemory::EvalMemory()
 {
     assertGCInitialized();
 #if NIX_USE_BOEHMGC
-    freeLists = static_cast<void **>(GC_MALLOC_UNCOLLECTABLE(2 * sizeof(void *)));
+    freeLists = static_cast<void **>(GC_MALLOC_UNCOLLECTABLE((maxListedEnvSize + 1) * sizeof(void *)));
     if (!freeLists)
         throw std::bad_alloc();
 #endif
