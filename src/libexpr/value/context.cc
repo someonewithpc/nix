@@ -1,6 +1,7 @@
 #include "nix/util/util.hh"
 #include "nix/expr/value/context.hh"
 #include "nix/store/store-dir-config.hh"
+#include "nix/expr/value.hh"
 
 namespace nix {
 
@@ -110,6 +111,63 @@ std::string NixStringContextElem::display(const StoreDirConfig & store) const
             [&](const NixStringContextElem::Built & b) -> std::string { return SingleDerivedPath{b}.to_string(store); },
         },
         raw);
+}
+
+static std::strong_ordering compareEncodedSingleDerivedPaths(std::string_view a, std::string_view b) noexcept
+{
+    auto ia = a.find('!');
+    auto ib = b.find('!');
+    if (ia == std::string_view::npos || ib == std::string_view::npos) {
+        if (ia != ib)
+            return ia == std::string_view::npos ? std::strong_ordering::less : std::strong_ordering::greater;
+        return a <=> b;
+    }
+    if (auto c = compareEncodedSingleDerivedPaths(a.substr(ia + 1), b.substr(ib + 1)); c != 0)
+        return c;
+    return a.substr(0, ia) <=> b.substr(0, ib);
+}
+
+std::strong_ordering compareEncodedContextElems(std::string_view a, std::string_view b) noexcept
+{
+    /* Variant index of `NixStringContextElem::Raw`: Opaque, DrvDeep, Built */
+    auto kind = [](std::string_view s) { return s[0] == '!' ? 2 : s[0] == '=' ? 1 : 0; };
+    auto ka = kind(a);
+    auto kb = kind(b);
+    if (ka != kb)
+        return ka <=> kb;
+    if (ka == 0)
+        return a <=> b;
+    if (ka == 1)
+        return a.substr(1) <=> b.substr(1);
+    return compareEncodedSingleDerivedPaths(a.substr(1), b.substr(1));
+}
+
+void NixStringContext::addEncoded(
+    const void * context, const StringData * const * begin, const StringData * const * end)
+{
+    if (begin == end)
+        return;
+    wholeContext = empty() ? context : nullptr;
+    encoded.insert(encoded.end(), begin, end);
+    /* A derivation's attributes add the same few elements many times */
+    if (encoded.size() > 2 * compactedSize + 64) {
+        std::ranges::sort(encoded);
+        encoded.erase(std::unique(encoded.begin(), encoded.end()), encoded.end());
+        compactedSize = encoded.size();
+        wholeContext = nullptr;
+    }
+}
+
+void NixStringContext::materialize() const
+{
+    if (encoded.empty())
+        return;
+    std::ranges::sort(encoded);
+    auto last = std::unique(encoded.begin(), encoded.end());
+    for (auto i = encoded.begin(); i != last; ++i)
+        elems.insert(NixStringContextElem::parse((*i)->view()));
+    encoded.clear();
+    encoded.shrink_to_fit();
 }
 
 } // namespace nix

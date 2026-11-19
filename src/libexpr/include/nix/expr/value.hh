@@ -379,7 +379,7 @@ struct ValueBase
             /**
              * @return null pointer when context.empty()
              */
-            static Context * fromBuilder(const NixStringContext & context, EvalMemory & mem);
+            static const Context * fromBuilder(const NixStringContext & context, EvalMemory & mem);
         };
 
         /**

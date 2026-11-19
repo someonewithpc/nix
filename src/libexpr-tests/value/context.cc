@@ -127,4 +127,48 @@ RC_GTEST_PROP(NixStringContextElemTest, prop_round_rip, (const NixStringContextE
     RC_ASSERT(o == NixStringContextElem::parse(o.to_string(), xpSettings));
 }
 
+static int sign(std::strong_ordering o)
+{
+    return o < 0 ? -1 : o > 0 ? 1 : 0;
+}
+
+TEST(NixStringContextElemTest, encoded_order)
+{
+    std::vector<SingleDerivedPath> paths;
+    for (auto base :
+         {"g1w7hy3qg1w7hy3qg1w7hy3qg1w7hy3q-x",
+          "g1w7hy3qg1w7hy3qg1w7hy3qg1w7hy3q-x.drv",
+          "g1w7hy3qg1w7hy3qg1w7hy3qg1w7hy3q-x-y.drv",
+          "00w7hy3qg1w7hy3qg1w7hy3qg1w7hy3q-z.drv"})
+        paths.push_back(SingleDerivedPath::Opaque{StorePath{base}});
+    for (int depth = 0; depth < 2; ++depth) {
+        auto n = paths.size();
+        for (size_t i = 0; i < n; ++i)
+            for (auto output : {"", "out", "dev", "out2", "o"})
+                paths.push_back(
+                    SingleDerivedPath::Built{
+                        .drvPath = make_ref<SingleDerivedPath>(paths[i]),
+                        .output = output,
+                    });
+    }
+
+    std::vector<NixStringContextElem> elems;
+    for (auto & p : paths) {
+        std::visit([&](auto & x) { elems.push_back(NixStringContextElem{x}); }, p.raw());
+        if (auto * o = std::get_if<SingleDerivedPath::Opaque>(&p.raw()))
+            elems.push_back(NixStringContextElem::DrvDeep{.drvPath = o->path});
+    }
+
+    for (auto & a : elems)
+        for (auto & b : elems)
+            ASSERT_EQ(sign(compareEncodedContextElems(a.to_string(), b.to_string())), sign(a <=> b))
+                << a.to_string() << " " << b.to_string();
+}
+
+RC_GTEST_PROP(
+    NixStringContextElemTest, prop_encoded_order, (const NixStringContextElem & a, const NixStringContextElem & b))
+{
+    RC_ASSERT(sign(compareEncodedContextElems(a.to_string(), b.to_string())) == sign(a <=> b));
+}
+
 } // namespace nix

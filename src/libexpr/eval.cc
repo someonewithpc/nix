@@ -1126,15 +1126,37 @@ void Value::mkString(std::string_view s, EvalMemory & mem)
     mkStringNoCopy(StringData::make(mem, s));
 }
 
-Value::StringWithContext::Context *
+const Value::StringWithContext::Context *
 Value::StringWithContext::Context::fromBuilder(const NixStringContext & context, EvalMemory & mem)
 {
     if (context.empty())
         return nullptr;
 
-    auto ctx = new (mem.allocBytes<value_type, sizeof(Context)>(context.size())) Context(context.size());
-    std::ranges::transform(
-        context, ctx->elems, [&](const NixStringContextElem & elt) { return &StringData::make(mem, elt.to_string()); });
+    if (auto * whole = context.getWholeContext())
+        return static_cast<const Context *>(whole);
+
+    auto & typed = context.getTyped();
+    auto & encoded = context.getEncoded();
+    if (encoded.empty()) {
+        auto ctx = new (mem.allocBytes<value_type, sizeof(Context)>(typed.size())) Context(typed.size());
+        std::ranges::transform(typed, ctx->elems, [&](const NixStringContextElem & elt) {
+            return &StringData::make(mem, elt.to_string());
+        });
+        return ctx;
+    }
+
+    NixStringContext::Encoded all;
+    all.reserve(encoded.size() + typed.size());
+    all.insert(all.end(), encoded.begin(), encoded.end());
+    for (auto & elt : typed)
+        all.push_back(&StringData::make(mem, elt.to_string()));
+    std::ranges::sort(
+        all, [](value_type a, value_type b) { return compareEncodedContextElems(a->view(), b->view()) < 0; });
+    auto last = std::unique(all.begin(), all.end(), [](value_type a, value_type b) { return a->view() == b->view(); });
+    size_type n = last - all.begin();
+
+    auto ctx = new (mem.allocBytes<value_type, sizeof(Context)>(n)) Context(n);
+    std::copy(all.begin(), last, ctx->elems);
     return ctx;
 }
 
@@ -2705,7 +2727,12 @@ std::string_view EvalState::forceString(Value & v, const PosIdx pos, std::string
 
 void copyContext(const Value & v, NixStringContext & context, const ExperimentalFeatureSettings & xpSettings)
 {
-    if (auto * ctx = v.context())
+    auto * ctx = v.context();
+    if (!ctx)
+        return;
+    if (&xpSettings == &experimentalFeatureSettings)
+        context.addEncoded(ctx, ctx->begin(), ctx->end());
+    else
         for (auto * elem : *ctx)
             context.insert(NixStringContextElem::parse(elem->view(), xpSettings));
 }
