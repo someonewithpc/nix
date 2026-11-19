@@ -72,3 +72,23 @@ echo "$output" | grep "is forbidden"
 echo "$output" | grepInverse -F restricted-secret
 
 expectStderr 1 nix-instantiate --restrict-eval true ./dependencies.nix | grepQuiet "forbidden in restricted mode"
+
+# A store path copied mid-eval is allowed from then on, with everything below it,
+# while its siblings stay forbidden.
+mkdir -p "$TEST_ROOT/allow-later/dir"
+echo hi > "$TEST_ROOT/allow-later/dir/file"
+echo other > "$TEST_ROOT/allow-later/dir/other"
+allowLater=$(nix-store --add "$TEST_ROOT/allow-later/dir")
+# shellcheck disable=SC2016
+[[ $(cd "$TEST_ROOT/allow-later" && nix-instantiate --restrict-eval --eval --strict -I src=. -E "[
+  (builtins.pathExists \"$allowLater/file\")
+  (builtins.readFile \"\${./dir}/file\")
+  (builtins.pathExists \"$allowLater/other\")
+  (builtins.pathExists \"$allowLater-x\")
+  (builtins.pathExists \"$NIX_STORE_DIR\")
+]") == '[ false "hi\n" true false true ]' ]]
+# shellcheck disable=SC2016
+expectStderr 1 nix-instantiate --restrict-eval --eval --strict -I src="$TEST_ROOT/allow-later" -E "[
+  (builtins.readFile \"\${$TEST_ROOT/allow-later/dir}/file\")
+  (builtins.readFile \"$allowLater-x/file\")
+]" | grepQuiet "access to absolute path '$allowLater-x/file' is forbidden in restricted mode"
