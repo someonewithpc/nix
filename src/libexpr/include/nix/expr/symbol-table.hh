@@ -299,9 +299,15 @@ public:
     }
 
     /**
-     * Converts a string into a symbol.
+     * Converts a string into a symbol, through a cache of the calling
+     * thread's that needs no lock on a hit
      */
-    Symbol create(std::string_view s)
+    Symbol create(std::string_view s);
+
+    /**
+     * `create` without the cache
+     */
+    Symbol createShared(std::string_view s)
     {
         Symbol res;
         symbols.insert_and_cvisit(
@@ -452,7 +458,7 @@ inline void StaticSymbolTable::copyIntoSymbolTable(SymbolTable & symtab) const
 {
     for (std::size_t i = 0; i < size; ++i) {
         auto [str, staticSym] = symbols[i];
-        auto sym = symtab.create(str);
+        auto sym = symtab.createShared(str);
         if (sym != staticSym) [[unlikely]]
             unreachable();
     }

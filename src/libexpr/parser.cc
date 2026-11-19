@@ -334,7 +334,7 @@ public:
 
     [[gnu::noinline]] Symbol insert(SymbolTable & symbols, const Key & k, size_t slot)
     {
-        Symbol sym = symbols.create(k.s);
+        Symbol sym = symbols.createShared(k.s);
         /* The table's copy, which lives as long as the table */
         put(k, slot, sym, std::string_view(symbols[sym]).data());
         return sym;
@@ -2280,6 +2280,13 @@ Expr * parse(
 }
 
 } // namespace
+
+Symbol SymbolTable::create(std::string_view s)
+{
+    auto & cache = symbolCache;
+    cache.start(*this);
+    return cache.get(*this, SymbolCache::key(s));
+}
 
 Expr * parseExprFromBuf(
     ParseBuffer & text,
