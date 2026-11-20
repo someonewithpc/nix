@@ -863,6 +863,58 @@ Suites lang, toString-path, restricted and the expr, util and store unit
 tests: 6 passed, 0 failed, lang-gc skips itself. The store tests' HTTPS
 cases need the sandbox's `HTTPS_PROXY` unset
 
+### 2026-11-20 on beryllium: store and start-up follow-ups
+
+Round trips are the system eval in write mode, `--no-eval-cache`,
+through a 2.35.6 daemon (`nix daemon --force-untrusted`) over a chroot
+store that already holds the closure, counted with strace as reads on
+the socket after a write. Instructions and wall are medians of 3
+interleaved runs at load 2 to 4, static dev builds of each commit:
+
+| Commit | Round trips | hello | minimal NixOS | system, write mode | system wall |
+|---|---|---|---|---|---|
+| fast-eval | 3,869 | 840.5 M | 16.53 G | 52.43 G | 5.68 s |
+| flush and fail (`fe-store-fu~4`) | 3,869 | 840.2 M | 16.53 G | 52.45 G | 5.70 s |
+| queued sources (`fe-store-fu~3`) | 132 | 840.2 M | 16.53 G | 53.04 G | 5.51 s |
+| valid paths cached (`fe-store-fu~2`) | 125 | 840.2 M | 16.53 G | 53.00 G | 5.49 s |
+| prefetcher gate (`fe-store-fu~1`) | 125 | 662.8 M | 16.54 G | 53.03 G | 5.54 s |
+
+- A failed queued write now fails the command with the daemon's message
+  and exit status, also when an evaluation error came after it, and
+  `nix eval`, `nix-instantiate` and `nix-env -q` print nothing. The
+  evaluation trace above the message is gone, since the write fails
+  after the evaluator left the derivation. Test:
+  `tests/functional/derivation-write-errors.sh` (read-only store dir
+  behind a daemon)
+- What the 3,869 were: 2,180 AddToStore of `builtins.toFile`, 40 of
+  sources without a fetcher cache key, 1,437 IsValidPath of sources
+  with one. Text files and small sources now go in one
+  AddMultipleToStore per flush (sent whether valid or not, as
+  AddToStore does, with the daemon's temp root); cached sources are
+  checked with the derivations and copied at the flush if gone. The
+  client hashes the text files, 1.2% more instructions
+- Into fresh chroot stores, fast-eval and the branch write the same
+  19,428 paths, and `nix path-info --all --json` agrees on NAR hash,
+  size, content address, references, deriver and signatures
+- Positive `isValidPath` answers: a build with 800 built inputs
+  (`bench/scripts/a6/wide.nix` in a chroot store) went from 492 M to
+  445 M instructions. The entry goes when a GC in this process deletes
+  the path, as queryPathInfo's does
+- Prefetcher gate: the threads start once 512 imports are queued. hello
+  queues 122, minimal NixOS 2,486, the system 2,822. On hello, task
+  clock 155 to 129 ms and max RSS 162 to 110 MB; the system holds
+  (52.06 to 52.05 G, 4.97 to 4.98 s, 1563 to 1557 MB, read-only)
+- The lock file cache was not done. On the hit (88.6 M through the
+  daemon) the lock file costs 4.0% of the samples: JSON parse 2.2%,
+  building the nodes 1.5%. A disk cache would still have to build the
+  nodes, so it saves at most about 2%
+
+Tests: T0 `eval-diff.sh -s all` against the base build, 0 of 1507 cases
+differ. `meson test` suites main, flakes, ca and the store, expr, flake
+and fetchers unit tests, without `HTTPS_PROXY`: 192 passed, 3 failed, 6
+skipped. The 3 are `build-remote-trustless-should-{pass-2,pass-3,fail-0}`,
+the "File name too long" lock file of long worktree paths seen before
+
 ## Left to do
 
 - Decide on mimalloc eager commit, which is most of the memory the
@@ -875,7 +927,7 @@ cases need the sandbox's `HTTPS_PROXY` unset
   cache on 37% of its samples once the table outgrows L2
 - Build and test NEON under qemu-aarch64
 - Decide on the cachix spool hook (`bench/a6-proposals/cachix-spool.patch`)
-- Reading the 55 KB lock file is 8% of an eval cache hit; A3 planned to
-  keep the parsed lock keyed by its content hash
+- Reading the 55 KB lock file is 4% of an eval cache hit, of which a
+  parse cache could save about half; not done (see store follow-ups)
 - Kernel time per sandboxed build (10 ms) and per input path (0.07-0.13
   ms) need kernel profiles, which `perf_event_paranoid` 2 rules out
