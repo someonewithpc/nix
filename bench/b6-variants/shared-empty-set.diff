@@ -1,0 +1,67 @@
+diff --git a/src/libexpr/eval.cc b/src/libexpr/eval.cc
+index 6571e3693..a6970ce27 100644
+--- a/src/libexpr/eval.cc
++++ b/src/libexpr/eval.cc
+@@ -1501,6 +1501,15 @@ void ExprPath::eval(EvalState & state, Env & env, Value & v)
+     v = this->v;
+ }
+ 
++Value * ExprAttrs::maybeThunk(EvalState & state, Env & env)
++{
++    if (attrs->empty() && dynamicAttrs->empty()) {
++        state.nrAvoided++;
++        return &Value::vEmptyAttrs;
++    }
++    return Expr::maybeThunk(state, env);
++}
++
+ Env * ExprAttrs::buildInheritFromEnv(EvalState & state, Env & up)
+ {
+     Env & inheritEnv = state.mem.allocEnv(inheritFromExprs->size());
+diff --git a/src/libexpr/include/nix/expr/nixexpr.hh b/src/libexpr/include/nix/expr/nixexpr.hh
+index efdec4f61..58d741457 100644
+--- a/src/libexpr/include/nix/expr/nixexpr.hh
++++ b/src/libexpr/include/nix/expr/nixexpr.hh
+@@ -615,6 +615,7 @@ struct ExprAttrs : Expr
+     }
+ 
+     void remapSymbols(const SymbolRemap & remap) override;
++    Value * maybeThunk(EvalState & state, Env & env) override;
+     COMMON_METHODS
+ 
+     /**
+diff --git a/src/libexpr/include/nix/expr/value.hh b/src/libexpr/include/nix/expr/value.hh
+index cde99e81c..0f99f29c5 100644
+--- a/src/libexpr/include/nix/expr/value.hh
++++ b/src/libexpr/include/nix/expr/value.hh
+@@ -1183,6 +1183,13 @@ struct Value : public ValueStorage<sizeof(void *)>
+      */
+     static Value vEmptyList;
+ 
++    /**
++     * Empty attribute set constant.
++     *
++     * This is _not_ a singleton. Pointer equality is _not_ sufficient.
++     */
++    static Value vEmptyAttrs;
++
+     /**
+      * `null` constant.
+      *
+diff --git a/src/libexpr/value.cc b/src/libexpr/value.cc
+index bfdee3cde..0e5772f0a 100644
+--- a/src/libexpr/value.cc
++++ b/src/libexpr/value.cc
+@@ -16,6 +16,12 @@ Value Value::vEmptyList = []() {
+     return res;
+ }();
+ 
++Value Value::vEmptyAttrs = []() {
++    Value res;
++    res.mkAttrs(&Bindings::emptyBindings);
++    return res;
++}();
++
+ Value Value::vNull = []() {
+     Value res;
+     res.mkNull();

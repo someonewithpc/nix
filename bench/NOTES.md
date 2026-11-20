@@ -752,6 +752,58 @@ Checks:
   22 passed, lang-gc skipped (it always skips). nix-store-tests passes
   with `HTTPS_PROXY` unset and fails its 3 HTTPS cases with it set, as
   A6 found
+### 2026-11-20 on beryllium: small interpreter fixes (B6)
+
+| Build | hello | minimal NixOS | real system |
+|---|---|---|---|
+| `fast-eval` | 0.868 G | 16.95 G | 53.06 G |
+| B6 (`fe-b6-interp`) | 0.854 G | 16.63 G | 52.25 G |
+| Change | -1.6% | -1.8% | -1.5% |
+
+Medians of 3 interleaved runs of `instructions:u`, `nix eval --read-only
+--no-eval-cache`, same workloads and pinned `/etc/nixos` rev as B3, with
+`bench/b6-variants/measure.sh 3 "hello nixos sys" base=<prefix>
+new=<prefix>`. Both builds are `build.sh dev` from this worktree, so both
+link the Nix libraries into `nix` statically. Peak RSS does not move
+
+Each fix measured against the step before it:
+
+| Fix | hello | minimal NixOS | real system | Kept |
+|---|---|---|---|---|
+| Value and size-1 env caches as `EvalMemory` members | -0.9% | -1.4% | -0.9% | yes |
+| Free lists for envs of 2 to 8 slots | -0.1% | -0.1% | -0.2% | yes |
+| libexpr with `-fno-plt` | -0.6% | -0.4% | -0.4% | yes |
+| plus `-fvisibility-inlines-hidden` | | | no further change | no |
+| Formals matched by a merge with a small one-layer set | 0.0% | +0.2% | -0.1% | no |
+| Skip the profiler hooks in an outer `callFunction` | +0.3% | +0.9% | +0.5% | no |
+| `ExprLambda::maybeThunk` returns the closure | -0.1% | -0.25% | -0.15% | no, changes output |
+
+- The caches were `thread_local std::shared_ptr` behind a TLS init
+  check. The list heads now sit in a `GC_MALLOC_UNCOLLECTABLE` block owned
+  by `EvalMemory`, which the collector scans. No other thread allocates
+  values, since the prefetch and parse threads only build ASTs
+- Binary search per formal is already cheap. Most argument sets are
+  small and the set's array is hot after `forceAttrs`
+- Moving the call body into its own function costs more than the
+  `Finally` and the two hook tests it skips
+- A lambda or `{ }` without a thunk shows up in output:
+  `nix-instantiate --eval -E '{ f = x: x; e = {}; }'` prints
+  `{ e = <CODE>; f = <CODE>; }` on base, and `builtins.trace` prints
+  `«thunk»` for an unforced attribute, where both would print the
+  value. The plan said only the stats change, which is wrong, so the
+  shared `{ }` was not built. Upstream already does this for strings,
+  numbers and paths, so it is the owner's call
+- The plan's 2.6% for PLT stubs and `__tls_get_addr` came from a build
+  that linked libexpr as a shared library. With the static link they are
+  0.4% of cycles on the minimal NixOS, which is why `-fno-plt` saves
+  less than that and hidden inlines save nothing
+
+The dropped variants are in `bench/b6-variants/`
+
+Checks: T0 `eval-diff.sh -s all` against base, 0 of 1507 cases differ.
+libexpr unit tests 398 passed, 0 failed. `tests/functional/lang` passed,
+lang-gc skipped. hello and the minimal NixOS with `GC_INITIAL_HEAP_SIZE=2000000
+GC_FREE_SPACE_DIVISOR=50` (54 and 159 collections) give base's drv paths
 
 ## Left to do
 

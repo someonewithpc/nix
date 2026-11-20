@@ -1,0 +1,36 @@
+commit 3dc3d1fe8dab5ddf8543c65a6f69b5fb1a5f9c90
+Author: Hugo Sales <hugo@hsal.es>
+Date:   Thu Nov 19 23:46:39 2026 +0000
+
+    WIP: make the closure of a lambda argument without a thunk
+
+diff --git a/src/libexpr/eval.cc b/src/libexpr/eval.cc
+index 25821f361..5bce68334 100644
+--- a/src/libexpr/eval.cc
++++ b/src/libexpr/eval.cc
+@@ -1798,6 +1798,13 @@ void ExprLambda::eval(EvalState & state, Env & env, Value & v)
+     v.mkLambda(&env, this);
+ }
+ 
++Value * ExprLambda::maybeThunk(EvalState & state, Env & env)
++{
++    Value * v = state.allocValue();
++    v->mkLambda(&env, this);
++    return v;
++}
++
+ void EvalState::callFunction(Value & fun, std::span<Value * const> args, Value & vRes, const PosIdx pos)
+ {
+     auto _level = addCallDepth(pos);
+diff --git a/src/libexpr/include/nix/expr/nixexpr.hh b/src/libexpr/include/nix/expr/nixexpr.hh
+index 86d9d7d22..efdec4f61 100644
+--- a/src/libexpr/include/nix/expr/nixexpr.hh
++++ b/src/libexpr/include/nix/expr/nixexpr.hh
+@@ -775,6 +775,7 @@ public:
+ 
+     virtual void setDocComment(DocComment docComment) override;
+     void remapSymbols(const SymbolRemap & remap) override;
++    Value * maybeThunk(EvalState & state, Env & env) override;
+     COMMON_METHODS
+ };
+ 

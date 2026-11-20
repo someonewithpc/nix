@@ -1,0 +1,36 @@
+commit d73159ae44691a97ca2f94f6e0a1cde7efe4dfed
+Author: Hugo Sales <hugo@hsal.es>
+Date:   Thu Nov 19 23:45:35 2026 +0000
+
+    WIP: match formals against a small one-layer argument set by a merge
+
+diff --git a/src/libexpr/eval.cc b/src/libexpr/eval.cc
+index 25821f361..8bb551575 100644
+--- a/src/libexpr/eval.cc
++++ b/src/libexpr/eval.cc
+@@ -1854,8 +1854,24 @@ void EvalState::callFunction(Value & fun, std::span<Value * const> args, Value &
+                    there is no matching actual argument but the formal
+                    argument has a default, use the default. */
+                 size_t attrsUsed = 0;
++                auto argAttrs = args[0]->attrs();
++                /* Formals and a one-layer set are both sorted by symbol, so a
++                   set not much bigger than the formals is matched by walking
++                   both at once */
++                const Attr *cursor = nullptr, *attrsEnd = nullptr;
++                if (!argAttrs->isLayered() && argAttrs->size() <= 2 * formals->formals.size() + 4) {
++                    auto flat = argAttrs->flatAttrs();
++                    cursor = flat.data();
++                    attrsEnd = cursor + flat.size();
++                }
+                 for (auto & i : formals->formals) {
+-                    auto j = args[0]->attrs()->get(i.name);
++                    const Attr * j;
++                    if (attrsEnd) {
++                        while (cursor != attrsEnd && cursor->name < i.name)
++                            ++cursor;
++                        j = cursor != attrsEnd && cursor->name == i.name ? cursor : nullptr;
++                    } else
++                        j = argAttrs->get(i.name);
+                     if (!j) {
+                         if (!i.def) {
+                             error<TypeError>(
