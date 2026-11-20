@@ -146,6 +146,20 @@ void Store::writeDerivationText(
     assert(path2 == path);
 }
 
+StorePath Store::addTextToStore(
+    std::string_view name, std::string_view contents, const StorePathSet & references, RepairFlag repair)
+{
+    StringSource s{contents};
+    return addToStoreFromDump(
+        s,
+        name,
+        FileSerialisationMethod::Flat,
+        ContentAddressMethod::Raw::Text,
+        HashAlgorithm::SHA256,
+        references,
+        repair);
+}
+
 // FIXME: remove
 bool isDerivation(std::string_view fileName)
 {

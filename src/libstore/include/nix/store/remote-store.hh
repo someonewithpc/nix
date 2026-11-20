@@ -143,6 +143,27 @@ public:
         const StorePathSet & references,
         RepairFlag repair = NoRepair) override;
 
+    /**
+     * Queued like `writeDerivationText`, and sent with the other text
+     * files of the queue in one `AddMultipleToStore`, which like
+     * `AddToStore` sends the contents even when the path is valid.
+     */
+    StorePath addTextToStore(
+        std::string_view name,
+        std::string_view contents,
+        const StorePathSet & references,
+        RepairFlag repair = NoRepair) override;
+
+    bool queueSourceCheck(
+        const StorePath & path, const SourcePath & src, std::string_view name, ContentAddressMethod method) override;
+
+    /**
+     * Dumps `src` now, and sends it with the queue's text files when it
+     * is small.
+     */
+    std::optional<std::pair<StorePath, Hash>> queueSourceCopy(
+        std::string_view name, const SourcePath & src, ContentAddressMethod method, PathFilter & filter) override;
+
     void flushDerivationWrites() override;
 
     void flushDerivationWrites(const StorePath & path) override;
@@ -224,10 +245,34 @@ private:
 
     struct PendingDerivation
     {
+        enum class Kind {
+            Derivation,
+            Text,
+            /**
+             * A source copy, with its NAR in `contents`. Sent like text
+             * files
+             */
+            Nar,
+            /**
+             * A source path to check, and copy from `source` if missing.
+             * `contents` is its name
+             */
+            Source,
+        };
+
+        Kind kind;
         StorePath path;
         std::string contents;
         StorePathSet references;
+        std::optional<SourcePath> source = {};
+        ContentAddressMethod method = ContentAddressMethod::Raw::Text;
     };
+
+    void queueWrite(PendingDerivation && drv);
+
+    void addTextsToStore(const std::vector<const PendingDerivation *> & texts);
+
+    void copyQueuedSource(const PendingDerivation & src);
 
     struct PendingDerivations
     {

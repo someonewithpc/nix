@@ -923,6 +923,39 @@ public:
         RepairFlag repair = NoRepair);
 
     /**
+     * Add a text-hashed file, as `builtins.toFile` does, and return its
+     * path. Stores may queue the write like `writeDerivationText`.
+     */
+    virtual StorePath addTextToStore(
+        std::string_view name,
+        std::string_view contents,
+        const StorePathSet & references,
+        RepairFlag repair = NoRepair);
+
+    /**
+     * `path` is what a cache says copying `src` with `method` gives.
+     * Returns true when the store queued the check that `path` is valid,
+     * and the copy of `src` should it not be, as `writeDerivationText`
+     * queues writes. False means the caller has to check now.
+     */
+    /**
+     * Copy `src` with `method` and return its store path and content
+     * hash, or nothing when the store does not queue the copy and the
+     * caller has to copy it.
+     */
+    virtual std::optional<std::pair<StorePath, Hash>> queueSourceCopy(
+        std::string_view name, const SourcePath & src, ContentAddressMethod method, PathFilter & filter)
+    {
+        return std::nullopt;
+    }
+
+    virtual bool queueSourceCheck(
+        const StorePath & path, const SourcePath & src, std::string_view name, ContentAddressMethod method)
+    {
+        return false;
+    }
+
+    /**
      * Finish the writes `writeDerivationText` left queued, if any. Stores
      * that queue them do this themselves before anything that could read
      * the store; callers call it where a write error should surface.

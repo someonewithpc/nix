@@ -2810,17 +2810,7 @@ static void prim_toFile(EvalState & state, CallSite callSite, Value * const * ar
                                                      .hash = hashString(HashAlgorithm::SHA256, contents),
                                                      .references = std::move(refs),
                                                  })
-                                           : ({
-                                                 StringSource s{contents};
-                                                 state.store->addToStoreFromDump(
-                                                     s,
-                                                     name,
-                                                     FileSerialisationMethod::Flat,
-                                                     ContentAddressMethod::Raw::Text,
-                                                     HashAlgorithm::SHA256,
-                                                     refs,
-                                                     state.repair);
-                                             });
+                                           : state.store->addTextToStore(name, contents, refs, state.repair);
 
     /* Note: we don't need to add `context' to the context of the
        result, since `storePath' itself has references to the paths

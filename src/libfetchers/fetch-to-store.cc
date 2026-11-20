@@ -71,12 +71,20 @@ std::pair<StorePath, Hash> fetchToStore2(
             auto storePath =
                 store.makeFixedOutputPathFromCA(name, ContentAddressWithReferences::fromParts(method, hash, {}));
 
-            /* Add a temproot before the call to isValidPath to prevent accidental GC in case the
-               input is cached. Note that this must be done before to avoid races. */
-            if (mode != FetchMode::DryRun)
+            auto valid = [&] {
+                if (mode == FetchMode::DryRun)
+                    return true;
+                /* The store checks the path when it flushes its queue, and
+                   copies the source then if the path is gone */
+                if (!repair && store.queueSourceCheck(storePath, path, name, method))
+                    return true;
+                /* Add a temproot before the call to isValidPath to prevent accidental GC in case the
+                   input is cached. Note that this must be done before to avoid races. */
                 store.addTempRoot(storePath);
+                return store.isValidPath(storePath);
+            };
 
-            if (mode == FetchMode::DryRun || store.isValidPath(storePath)) {
+            if (valid()) {
                 debug(
                     "source path '%s' cache hit in '%s' (hash '%s')",
                     path,
@@ -117,6 +125,16 @@ std::pair<StorePath, Hash> fetchToStore2(
                   return std::make_pair(storePath, hash);
               }()
             : [&]() {
+                  if (!repair)
+                      if (auto queued = store.queueSourceCopy(name, path, method, filter2)) {
+                          printMsg(
+                              lvlChatty,
+                              "copied source '%s' -> '%s' (hash '%s')",
+                              path,
+                              store.printStorePath(queued->first),
+                              queued->second.to_string(HashFormat::SRI, true));
+                          return *queued;
+                      }
                   // FIXME: ideally addToStore() would return the hash
                   // right away (like computeStorePath()).
                   auto storePath = store.addToStore(name, path, method, HashAlgorithm::SHA256, {}, filter2, repair);

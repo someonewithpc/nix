@@ -204,6 +204,22 @@ RemoteStore::ConnectionHandle RemoteStore::getConnection()
     return ConnectionHandle(connections->get());
 }
 
+void RemoteStore::queueWrite(PendingDerivation && drv)
+{
+    {
+        auto pending(pendingDerivations.lock());
+        if (!pending->paths.insert(drv.path).second)
+            return;
+        pending->bytes += drv.contents.size();
+        pending->drvs.push_back(std::move(drv));
+        havePendingDerivations = true;
+        if (pending->drvs.size() < 4096 && pending->bytes < 32 * 1024 * 1024)
+            return;
+    }
+
+    flushDerivationWrites();
+}
+
 void RemoteStore::writeDerivationText(
     const StorePath & path, std::string_view contents, const StorePathSet & references, RepairFlag repair)
 {
@@ -213,18 +229,180 @@ void RemoteStore::writeDerivationText(
         return;
     }
 
+    queueWrite({.kind = PendingDerivation::Kind::Derivation, .path = path, .contents{contents}, .references = references});
+}
+
+StorePath RemoteStore::addTextToStore(
+    std::string_view name, std::string_view contents, const StorePathSet & references, RepairFlag repair)
+{
+    bool canQueue = !repair && ({
+        PathsChecked checked;
+        getConnection()->protoVersion.number >= WorkerProto::Version::Number{1, 32};
+    });
+    if (!canQueue)
+        return Store::addTextToStore(name, contents, references, repair);
+
+    auto path = makeFixedOutputPathFromCA(
+        name,
+        TextInfo{
+            .hash = hashString(HashAlgorithm::SHA256, contents),
+            .references = references,
+        });
+    queueWrite({.kind = PendingDerivation::Kind::Text, .path = path, .contents{contents}, .references = references});
+    return path;
+}
+
+bool RemoteStore::queueSourceCheck(
+    const StorePath & path, const SourcePath & src, std::string_view name, ContentAddressMethod method)
+{
+    queueWrite({
+        .kind = PendingDerivation::Kind::Source,
+        .path = path,
+        .contents{name},
+        .source = src,
+        .method = method,
+    });
+    return true;
+}
+
+std::optional<std::pair<StorePath, Hash>> RemoteStore::queueSourceCopy(
+    std::string_view name, const SourcePath & src, ContentAddressMethod method, PathFilter & filter)
+{
+    if (method != ContentAddressMethod::Raw::NixArchive || ({
+            PathsChecked checked;
+            getConnection()->protoVersion.number < WorkerProto::Version::Number{1, 32};
+        }))
+        return std::nullopt;
+
+    /* Larger sources are streamed to the daemon as before, which reads
+       them again */
+    struct Full
+    {};
+
+    struct LimitedSink : Sink
     {
-        auto pending(pendingDerivations.lock());
-        if (!pending->paths.insert(path).second)
-            return;
-        pending->bytes += contents.size();
-        pending->drvs.push_back({path, std::string{contents}, references});
-        havePendingDerivations = true;
-        if (pending->drvs.size() < 4096 && pending->bytes < 32 * 1024 * 1024)
-            return;
+        std::string s;
+
+        void operator()(std::string_view data) override
+        {
+            if (s.size() + data.size() > 8 * 1024 * 1024)
+                throw Full{};
+            s.append(data);
+        }
+    };
+
+    LimitedSink nar;
+    try {
+        src.dumpPath(nar, filter);
+    } catch (Full &) {
+        return std::nullopt;
     }
 
-    flushDerivationWrites();
+    auto hash = hashString(HashAlgorithm::SHA256, nar.s);
+    auto path = makeFixedOutputPathFromCA(
+        name,
+        FixedOutputInfo{
+            .method = FileIngestionMethod::NixArchive,
+            .hash = hash,
+            .references = {},
+        });
+    queueWrite({.kind = PendingDerivation::Kind::Nar, .path = path, .contents = std::move(nar.s)});
+    return std::pair{path, hash};
+}
+
+void RemoteStore::addTextsToStore(const std::vector<const PendingDerivation *> & texts)
+{
+    if (texts.empty())
+        return;
+
+    std::vector<std::pair<ValidPathInfo, std::string>> infos;
+    for (auto text : texts) {
+        if (text->kind == PendingDerivation::Kind::Nar) {
+            auto hash = hashString(HashAlgorithm::SHA256, text->contents);
+            auto info = ValidPathInfo::makeFromCA(
+                *this,
+                text->path.name(),
+                FixedOutputInfo{
+                    .method = FileIngestionMethod::NixArchive,
+                    .hash = hash,
+                    .references = {},
+                },
+                hash);
+            info.narSize = text->contents.size();
+            assert(info.path == text->path);
+            infos.emplace_back(std::move(info), text->contents);
+            continue;
+        }
+        StringSink nar;
+        dumpString(text->contents, nar);
+        auto info = ValidPathInfo::makeFromCA(
+            *this,
+            text->path.name(),
+            TextInfo{
+                .hash = hashString(HashAlgorithm::SHA256, text->contents),
+                .references = text->references,
+            },
+            hashString(HashAlgorithm::SHA256, nar.s));
+        info.narSize = nar.s.size();
+        assert(info.path == text->path);
+        infos.emplace_back(std::move(info), std::move(nar.s));
+    }
+
+    try {
+        auto conn(getConnection());
+        conn->to << WorkerProto::Op::AddMultipleToStore << NoRepair << true;
+        conn.withFramedSink([&](Sink & sink) {
+            sink << infos.size();
+            for (auto & [info, nar] : infos) {
+                WorkerProto::Serialise<ValidPathInfo>::write(
+                    *this,
+                    WorkerProto::WriteConn{
+                        .to = sink,
+                        .version = {.number = {.major = 1, .minor = 16}},
+                    },
+                    info);
+                sink(nar);
+            }
+        });
+    } catch (Error &) {
+        /* Find the failing write with the operation an unqueued write
+           sends, so that the error is the one it gives */
+        for (auto text : texts) {
+            StringSource s{text->contents};
+            bool nar = text->kind == PendingDerivation::Kind::Nar;
+            addToStoreFromDump(
+                s,
+                text->path.name(),
+                nar ? FileSerialisationMethod::NixArchive : FileSerialisationMethod::Flat,
+                nar ? ContentAddressMethod::Raw::NixArchive : ContentAddressMethod::Raw::Text,
+                HashAlgorithm::SHA256,
+                text->references,
+                NoRepair);
+        }
+    }
+
+    for (auto text : texts)
+        invalidatePathInfoCacheFor(text->path);
+}
+
+void RemoteStore::copyQueuedSource(const PendingDerivation & src)
+{
+    auto & source = *src.source;
+    debug("source path '%s' not in store", source);
+    Activity act(
+        *logger,
+        lvlChatty,
+        actFetchToStore,
+        fmt("copying '%s' to the store", source),
+        std::to_array<Logger::Field>({source.to_string(), (uint64_t) 0}));
+    auto path = Store::addToStore(src.contents, source, src.method, HashAlgorithm::SHA256, {}, defaultPathFilter, NoRepair);
+    act.result(resFetchToStore, printStorePath(path));
+    if (path != src.path)
+        throw Error(
+            "source path '%s' was cached as '%s', but its contents give '%s'",
+            source,
+            printStorePath(src.path),
+            printStorePath(path));
 }
 
 bool RemoteStore::hasPendingDerivation(const StorePathSet & paths)
@@ -282,13 +460,20 @@ void RemoteStore::flushDerivationWrites()
        filling the socket buffer before we read them. */
     addTempRoots(batch.paths);
 
+    /* Text files and source copies are sent whether valid or not, as
+       `AddToStore` would */
+    StorePathSet toCheck;
+    for (auto & drv : batch.drvs)
+        if (drv.kind != PendingDerivation::Kind::Text && drv.kind != PendingDerivation::Kind::Nar)
+            toCheck.insert(drv.path);
+
     StorePathSet valid;
     {
         auto conn(getConnection());
-        auto it = batch.paths.begin();
-        while (it != batch.paths.end()) {
+        auto it = toCheck.begin();
+        while (it != toCheck.end()) {
             std::vector<StorePath> chunk;
-            for (; it != batch.paths.end() && chunk.size() < 256; ++it) {
+            for (; it != toCheck.end() && chunk.size() < 1024; ++it) {
                 conn->to << WorkerProto::Op::IsValidPath;
                 WorkerProto::write(*this, *conn, *it);
                 chunk.push_back(*it);
@@ -301,9 +486,21 @@ void RemoteStore::flushDerivationWrites()
         }
     }
 
+    /* In queue order, since a write may reference an earlier one */
+    std::vector<const PendingDerivation *> texts;
     for (auto & drv : batch.drvs) {
+        if (drv.kind == PendingDerivation::Kind::Text || drv.kind == PendingDerivation::Kind::Nar) {
+            texts.push_back(&drv);
+            continue;
+        }
         if (valid.contains(drv.path))
             continue;
+        addTextsToStore(texts);
+        texts.clear();
+        if (drv.kind == PendingDerivation::Kind::Source) {
+            copyQueuedSource(drv);
+            continue;
+        }
         StringSource s{drv.contents};
         auto path2 = addToStoreFromDump(
             s,
@@ -315,6 +512,7 @@ void RemoteStore::flushDerivationWrites()
             NoRepair);
         assert(path2 == drv.path);
     }
+    addTextsToStore(texts);
 }
 
 void RemoteStore::setOptions()
