@@ -422,9 +422,16 @@ protected:
         std::chrono::time_point<std::chrono::steady_clock> time_point = std::chrono::steady_clock::now();
 
         /**
-         * Null if missing
+         * Null if missing, or if only known to be valid
          */
         std::shared_ptr<const ValidPathInfo> value;
+
+        /**
+         * `isValidPath` found the path, but nothing queried its info.
+         * Kept like a positive `queryPathInfo` answer, until the path
+         * is invalidated or the entry expires
+         */
+        bool validOnly = false;
 
         /**
          * Whether the value is valid as a cache entry. The path may not
@@ -438,7 +445,7 @@ protected:
          */
         inline bool didExist()
         {
-            return value != nullptr;
+            return value != nullptr || validOnly;
         }
     };
 

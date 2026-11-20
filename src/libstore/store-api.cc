@@ -557,6 +557,15 @@ bool Store::isValidPath(const StorePath & storePath)
 
     bool valid = isValidPathUncached(storePath);
 
+    /* Only garbage collection makes a valid path invalid, and it
+       invalidates the entry when it runs in this process */
+    if (valid && pathInfoCache) {
+        auto cache(pathInfoCache->lock());
+        auto res = cache->get(storePath);
+        if (!res || !res->value)
+            cache->upsert(storePath, PathInfoCacheValue{.validOnly = true});
+    }
+
     if (diskCache && !valid)
         // FIXME: handle valid = true case.
         diskCache->upsertNarInfo(
@@ -604,7 +613,7 @@ std::optional<std::shared_ptr<const ValidPathInfo>> Store::queryPathInfoFromClie
 
     if (pathInfoCache) {
         auto res = pathInfoCache->lock()->get(storePath);
-        if (res && res->isKnownNow(settings.getNarInfoDiskCacheSettings())) {
+        if (res && !res->validOnly && res->isKnownNow(settings.getNarInfoDiskCacheSettings())) {
             if (res->didExist())
                 return std::make_optional(res->value);
             else
