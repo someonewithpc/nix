@@ -955,6 +955,7 @@ queryJSON(Globals & globals, std::vector<PackageInfo> & elems, bool printOutPath
             throw;
         }
     }
+    globals.state->store->flushDerivationWrites();
     std::cout << topObj.dump(2);
 }
 
@@ -1284,8 +1285,10 @@ static void opQuery(Globals & globals, Strings opFlags, Strings opArgs)
         }
     }
 
-    if (!xmlOutput)
+    if (!xmlOutput) {
+        globals.state->store->flushDerivationWrites();
         printTable(std::cout, table);
+    }
 }
 
 static void opSwitchProfile(Globals & globals, Strings opFlags, Strings opArgs)

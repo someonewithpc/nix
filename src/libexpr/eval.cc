@@ -623,11 +623,13 @@ EvalState::~EvalState()
     /* Its threads use the rest of the state */
     importPrefetcher.reset();
 
-    /* For callers that never get to flush them themselves. */
+    /* For callers that never get to flush them themselves. A write
+       error then fails the program as the unbatched write would have */
     try {
         store->flushDerivationWrites();
     } catch (...) {
-        ignoreExceptionInDestructor();
+        if (!deferError(std::current_exception()))
+            ignoreExceptionInDestructor();
     }
 }
 

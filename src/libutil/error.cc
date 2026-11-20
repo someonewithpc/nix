@@ -6,7 +6,10 @@
 #include "nix/util/signals.hh"
 #include "nix/util/terminal.hh"
 #include "nix/util/position.hh"
+#include "nix/util/sync.hh"
+#include "nix/util/finally.hh"
 
+#include <atomic>
 #include <cinttypes>
 #include <iostream>
 #include <optional>
@@ -485,6 +488,27 @@ void unreachable(std::source_location loc)
     panic(std::string_view(buf, std::min(static_cast<int>(sizeof(buf)), n)));
 }
 
+static std::atomic<unsigned int> handlingExceptions{0};
+static Sync<std::exception_ptr> deferredError;
+
+bool deferError(std::exception_ptr e)
+{
+    if (!handlingExceptions)
+        return false;
+    auto deferred(deferredError.lock());
+    if (!*deferred)
+        *deferred = e;
+    return true;
+}
+
+static void rethrowDeferredError()
+{
+    std::exception_ptr e;
+    std::swap(e, *deferredError.lock());
+    if (e)
+        std::rethrow_exception(e);
+}
+
 int handleExceptions(const std::string & programName, fun<void()> body)
 {
     ReceiveInterrupts receiveInterrupts; // FIXME: need better place for this
@@ -501,7 +525,19 @@ int handleExceptions(const std::string & programName, fun<void()> body)
 
     std::string error = ANSI_RED "error:" ANSI_NORMAL " ";
     try {
-        body();
+        /* A deferred error comes from work started before the body
+           failed or returned, so it wins over the body's result */
+        ++handlingExceptions;
+        Finally done([&] { --handlingExceptions; });
+        try {
+            body();
+        } catch (Interrupted &) {
+            throw;
+        } catch (...) {
+            rethrowDeferredError();
+            throw;
+        }
+        rethrowDeferredError();
     } catch (Exit & e) {
         return e.status;
     } catch (UsageError & e) {

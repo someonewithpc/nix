@@ -121,16 +121,21 @@ struct CmdEval : MixJSON, InstallableValueCommand, MixReadOnlyOption
         else if (raw) {
             logger->stop();
             auto string = state->coerceToString(noPos, *v, context, "while generating the eval command output");
+            store->flushDerivationWrites();
             writeFull(getStandardOutput(), *string);
         }
 
         else if (json) {
-            printJSON(printValueAsJSON(*state, true, *v, pos, context, false));
+            auto json = printValueAsJSON(*state, true, *v, pos, context, false);
+            store->flushDerivationWrites();
+            printJSON(json);
         }
 
         else {
             ValuePrinter printer(*state, *v, PrintOptions{.force = true, .derivationPaths = true}, &context);
-            logger->cout("%s", printer);
+            auto text = fmt("%s", printer);
+            store->flushDerivationWrites();
+            logger->cout("%s", text);
         }
 
         state->ensureLazyPathsCopied(context);

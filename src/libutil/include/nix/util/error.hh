@@ -513,6 +513,16 @@ void panic(std::string_view msg);
 int handleExceptions(const std::string & programName, fun<void()> body);
 
 /**
+ * Keep an error that a destructor could not throw, so that the
+ * `handleExceptions` running the program reports it in place of the
+ * program's own result. Only the first one is kept.
+ *
+ * @return false when no `handleExceptions` is running, in which case the
+ * caller has to report the error itself
+ */
+bool deferError(std::exception_ptr e);
+
+/**
  * Print a basic error message with source position and std::terminate().
  *
  * @note: This assumes that the logger is operational

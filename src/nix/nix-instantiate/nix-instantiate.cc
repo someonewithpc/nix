@@ -53,18 +53,27 @@ void processExpr(
                 vRes = v;
             else
                 state.autoCallFunction(autoArgs, v, vRes);
-            if (output == okRaw)
-                std::cout << *state.coerceToString(noPos, vRes, context, "while generating the nix-instantiate output");
+            /* Derivations the value wrote must be in the store before it
+               is printed, as they would be unbatched. The XML printer
+               evaluates as it prints, so it gets no such flush */
+            if (output == okRaw) {
+                auto s = state.coerceToString(noPos, vRes, context, "while generating the nix-instantiate output");
+                state.store->flushDerivationWrites();
+                std::cout << *s;
+            }
             // We intentionally don't output a newline here. The default PS1 for Bash in NixOS starts with a newline
             // and other interactive shells like Zsh are smart enough to print a missing newline before the prompt.
             else if (output == okXML)
                 printValueAsXML(state, strict, location, vRes, std::cout, context, noPos);
             else if (output == okJSON) {
-                printValueAsJSON(state, strict, vRes, v.determinePos(noPos), std::cout, context);
-                std::cout << std::endl;
+                std::ostringstream json;
+                printValueAsJSON(state, strict, vRes, v.determinePos(noPos), json, context);
+                state.store->flushDerivationWrites();
+                std::cout << json.view() << std::endl;
             } else {
                 if (strict)
                     state.forceValueDeep(vRes);
+                state.store->flushDerivationWrites();
                 std::set<const void *> seen;
                 printAmbiguous(state, vRes, std::cout, &seen, &context);
                 std::cout << std::endl;
@@ -91,6 +100,7 @@ void processExpr(
                     if (store2)
                         drvPathS = store2->addPermRoot(drvPath, rootName).string();
                 }
+                state.store->flushDerivationWrites();
                 std::cout << fmt("%s%s\n", drvPathS, (outputName != "out" ? "!" + outputName : ""));
             }
         }
