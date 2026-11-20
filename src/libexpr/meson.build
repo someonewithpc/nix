@@ -14,6 +14,8 @@ project(
 
 cxx = meson.get_compiler('cpp')
 
+add_project_arguments(cxx.get_supported_arguments('-fno-plt'), language : 'cpp')
+
 subdir('nix-meson-build-support/deps-lists')
 
 configdata_pub = configuration_data()
