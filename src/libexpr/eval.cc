@@ -301,8 +301,12 @@ struct ImportPrefetcher
     unsigned threadsToStart;
 
     /* The threads start when the evaluator first asks for a queued
-       path, so that an eval cache hit, which reads flake.nix and none
-       of its imports, starts none */
+       path once this many are queued. An eval cache hit, which reads
+       flake.nix and none of its imports, starts none, and neither does
+       a small eval like nixpkgs' hello (122 queued), where the threads
+       cost more than they save. A NixOS system queues thousands */
+    static constexpr size_t minQueued = 512;
+
     ImportPrefetcher(EvalState & state, unsigned n)
         : state(state)
         , knownSymbols(state.symbols.size() + 1)
@@ -349,7 +353,7 @@ struct ImportPrefetcher
         {
             std::lock_guard lock(m);
             auto [i, added] = files.try_emplace(resolved, nullptr);
-            if (threadsToStart && seen.contains(resolved))
+            if (threadsToStart && seen.size() >= minQueued && seen.contains(resolved))
                 startThreads();
             if (added)
                 return nullptr;
